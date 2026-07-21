@@ -1,0 +1,63 @@
+# ============================================================
+#  FileNest · .gitignore
+#  Java 17 + Maven + JavaFX 项目
+# ============================================================
+
+### Maven 构建产物 ###
+target/
+out/
+build/
+*.jar
+*.war
+!.mvn/wrapper/maven-wrapper.jar
+dependency-reduced-pom.xml
+
+### 编译中间文件 ###
+*.class
+
+### 应用运行时数据 ###
+# 操作日志/撤销数据默认写在用户主目录 ~/.filenest，
+# 但若有人把它指向项目内，也一并忽略，避免把个人整理记录提交上去
+.filenest/
+*.log
+
+### IntelliJ IDEA ###
+.idea/
+*.iws
+*.iml
+*.ipr
+
+### Eclipse ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings/
+.springBeans
+.sts4-cache
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+### VS Code ###
+.vscode/
+
+### 操作系统 ###
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+### 环境/密钥（切勿提交真实大模型 Key） ###
+.env
+*.local.properties
