@@ -1,5 +1,6 @@
 package com.filenest.app;
 
+import com.filenest.core.advisor.AiAdvisor;
 import com.filenest.core.advisor.HeuristicAiAdvisor;
 import com.filenest.core.advisor.NoOpAiAdvisor;
 import com.filenest.core.advisor.TimeoutAiAdvisor;
@@ -14,6 +15,7 @@ import com.filenest.model.FileAction;
 import com.filenest.model.OrganizeContext;
 import com.filenest.model.OrganizePlan;
 import com.filenest.model.OrganizeResult;
+import com.filenest.model.OrganizeScan;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -22,7 +24,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -94,5 +98,50 @@ class OrganizeServiceTest {
         assertTrue(Files.exists(dir.resolve("note.txt")), "files return to their original location");
         assertTrue(Files.exists(dir.resolve("pic.jpg")));
         assertFalse(svc.canUndo(), "the undone batch is removed from history");
+    }
+
+    @Test
+    void scanAndSuggestionAreSeparateOperations(@TempDir Path dir) throws IOException {
+        Files.writeString(dir.resolve("note.txt"), "hello");
+        AtomicInteger advisorCalls = new AtomicInteger();
+        AiAdvisor countingAdvisor = (files, context) -> {
+            advisorCalls.incrementAndGet();
+            return List.of();
+        };
+        OperationLog log = new JsonOperationLog(dir.resolve(".filenest/ops.json"));
+        OrganizeService service = new OrganizeService(new FileScanner(), new ExtensionClassifier(),
+                new DuplicateDetector(), countingAdvisor, new FileExecutor(log), log);
+        OrganizeContext context = OrganizeContext.byType(dir);
+
+        OrganizeScan scan = service.scan(context);
+        assertEquals(0, advisorCalls.get(), "scanning must not call an advisor");
+
+        OrganizePlan plan = service.suggest(scan, context);
+        assertEquals(1, advisorCalls.get());
+        assertFalse(plan.isEmpty());
+    }
+
+    @Test
+    void protectedFilesAreVisibleButNotSentToAdvisor(@TempDir Path dir) throws IOException {
+        Files.writeString(dir.resolve(".env"), "secret");
+        Files.writeString(dir.resolve("note.txt"), "normal");
+        AtomicInteger advisorFileCount = new AtomicInteger();
+        AiAdvisor recordingAdvisor = (files, context) -> {
+            advisorFileCount.set(files.size());
+            return List.of();
+        };
+        OperationLog log = new JsonOperationLog(dir.resolve(".filenest/ops.json"));
+        OrganizeService service = new OrganizeService(new FileScanner(), new ExtensionClassifier(),
+                new DuplicateDetector(), recordingAdvisor, new FileExecutor(log), log);
+
+        OrganizeScan scan = service.scan(OrganizeContext.byType(dir));
+        assertEquals(2, scan.files().size(), "inventory must include protected files");
+        OrganizePlan plan = service.suggest(scan, OrganizeContext.byType(dir));
+
+        assertEquals(1, advisorFileCount.get(), "advisor must not receive protected files");
+        FileAction protectedAction = plan.actions().stream()
+                .filter(a -> a.sourcePath().getFileName().toString().equals(".env"))
+                .findFirst().orElseThrow();
+        assertFalse(protectedAction.isEffective());
     }
 }

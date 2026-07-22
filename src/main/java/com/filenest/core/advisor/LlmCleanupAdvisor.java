@@ -1,0 +1,162 @@
+package com.filenest.core.advisor;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.filenest.core.storage.CleanupSuggestion;
+import com.filenest.core.storage.FolderUsage;
+import com.filenest.core.storage.LargeFileUsage;
+import com.filenest.core.storage.StorageScanResult;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+/** URL-model cleanup advisor. It returns recommendations only and cannot delete files. */
+public final class LlmCleanupAdvisor implements CleanupAdvisor {
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private final String endpoint;
+    private final String apiKey;
+    private final String model;
+    private final HttpClient client;
+
+    public LlmCleanupAdvisor(String endpoint, String apiKey, String model) {
+        this.endpoint = endpoint == null ? "" : endpoint.trim();
+        this.apiKey = apiKey == null ? "" : apiKey.trim();
+        this.model = model == null || model.isBlank() ? "gpt-4o-mini" : model.trim();
+        validateEndpoint(this.endpoint);
+        client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+    }
+
+    @Override
+    public boolean available() { return !endpoint.isBlank(); }
+
+    @Override
+    public List<CleanupSuggestion> suggest(StorageScanResult scan) {
+        if (!available()) return List.of();
+        try {
+            String response = call(buildPrompt(scan));
+            return parse(response, scan);
+        } catch (Exception ex) {
+            throw new IllegalStateException("AI 清理建议调用失败: " + ex.getMessage(), ex);
+        }
+    }
+
+    private String buildPrompt(StorageScanResult scan) {
+        StringBuilder out = new StringBuilder("你是谨慎的磁盘清理顾问，只能建议，绝不能执行删除。\n")
+                .append("只返回JSON：{\"suggestions\":[{\"path\":\"扫描清单中的相对路径\",\"decision\":\"DELETE|REVIEW|KEEP\",\"confidence\":0.0,\"reason\":\"理由和风险\"}]}。\n")
+                .append("只有明确可重建的缓存或临时文件才用DELETE；用户文档、照片、源码必须KEEP或REVIEW。禁止编造路径。\n目录占用：\n");
+        scan.folders().stream().limit(100).forEach(folder -> out.append("DIR ")
+                .append(relative(scan.root(), folder.path())).append(" | ").append(folder.bytes()).append(" bytes\n"));
+        out.append("大文件：\n");
+        scan.largestFiles().stream().limit(100).forEach(file -> out.append("FILE ")
+                .append(relative(scan.root(), file.path())).append(" | ").append(file.bytes())
+                .append(" bytes | modified ").append(file.lastModified()).append('\n'));
+        return out.toString();
+    }
+
+    private String call(String prompt) throws Exception {
+        ObjectNode body = JSON.createObjectNode();
+        body.put("model", model);
+        body.put("temperature", 0);
+        body.put("stream", false);
+        ArrayNode messages = body.putArray("messages");
+        messages.addObject().put("role", "system").put("content", "Return valid JSON only. Never perform operations.");
+        messages.addObject().put("role", "user").put("content", prompt);
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(endpoint))
+                .timeout(Duration.ofSeconds(25)).header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(body), StandardCharsets.UTF_8));
+        if (!apiKey.isBlank()) request.header("Authorization", "Bearer " + apiKey);
+        HttpResponse<String> response = client.send(request.build(),
+                HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+            throw new IllegalStateException("HTTP " + response.statusCode());
+        }
+        return response.body();
+    }
+
+    private List<CleanupSuggestion> parse(String response, StorageScanResult scan) throws Exception {
+        JsonNode envelope = JSON.readTree(response);
+        JsonNode payload = envelope;
+        if (!envelope.has("suggestions") && !envelope.isArray()) {
+            JsonNode content = envelope.path("choices").path(0).path("message").path("content");
+            if (!content.isTextual()) content = envelope.path("message").path("content");
+            if (!content.isTextual()) content = envelope.path("response");
+            if (!content.isTextual()) throw new IllegalArgumentException("无法识别 AI 响应格式");
+            payload = JSON.readTree(stripFence(content.asText().trim()));
+        }
+        JsonNode suggestions = payload.isArray() ? payload : payload.path("suggestions");
+        if (!suggestions.isArray()) throw new IllegalArgumentException("AI 返回内容中没有 suggestions 数组");
+
+        Map<Path, Long> inventory = new HashMap<>();
+        for (FolderUsage folder : scan.folders()) inventory.put(folder.path().toAbsolutePath().normalize(), folder.bytes());
+        for (LargeFileUsage file : scan.largestFiles()) inventory.put(file.path().toAbsolutePath().normalize(), file.bytes());
+        List<CleanupSuggestion> result = new ArrayList<>();
+        for (JsonNode item : suggestions) {
+            String value = text(item, "path", "file", "folder");
+            if (value == null) continue;
+            Path candidate;
+            try { candidate = scan.root().resolve(Path.of(value)).toAbsolutePath().normalize(); }
+            catch (RuntimeException invalid) { continue; }
+            Long bytes = inventory.get(candidate);
+            if (bytes == null || !candidate.startsWith(scan.root())) continue;
+            CleanupSuggestion.Decision decision = decision(text(item, "decision", "action", "recommendation"));
+            String reason = text(item, "reason", "why", "explanation");
+            if (reason == null) reason = "AI 建议人工确认";
+            result.add(new CleanupSuggestion(candidate, bytes, decision, reason,
+                    item.path("confidence").asDouble(0.5), "URL AI（" + model + "）"));
+        }
+        return result;
+    }
+
+    private CleanupSuggestion.Decision decision(String value) {
+        String normalized = value == null ? "" : value.trim().toUpperCase(Locale.ROOT);
+        if (normalized.equals("DELETE") || normalized.contains("可删除")) return CleanupSuggestion.Decision.DELETE;
+        if (normalized.equals("KEEP") || normalized.contains("保留")) return CleanupSuggestion.Decision.KEEP;
+        return CleanupSuggestion.Decision.REVIEW;
+    }
+
+    private static String relative(Path root, Path path) {
+        try {
+            Path relative = root.relativize(path);
+            return relative.getNameCount() == 0 ? "." : relative.toString();
+        } catch (IllegalArgumentException ex) { return path.toString(); }
+    }
+
+    private String stripFence(String text) {
+        if (!text.startsWith("```")) return text;
+        int first = text.indexOf('\n');
+        int end = text.lastIndexOf("```");
+        return first >= 0 && end > first ? text.substring(first + 1, end).trim() : text;
+    }
+
+    private String text(JsonNode node, String... keys) {
+        for (String key : keys) {
+            JsonNode value = node.get(key);
+            if (value != null && value.isValueNode() && !value.asText().isBlank()) return value.asText();
+        }
+        return null;
+    }
+
+    private static void validateEndpoint(String endpoint) {
+        if (endpoint == null || endpoint.isBlank()) return;
+        URI uri = URI.create(endpoint);
+        if (uri.getHost() == null || !("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))) {
+            throw new IllegalArgumentException("AI API 地址必须是有效的 http/https URL");
+        }
+    }
+
+    @Override
+    public String name() { return "URL AI（" + model + "）"; }
+}

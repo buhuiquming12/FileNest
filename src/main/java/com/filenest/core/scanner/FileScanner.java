@@ -58,21 +58,6 @@ public final class FileScanner {
 
     private boolean shouldSkip(Path entry) {
         Path name = entry.getFileName();
-        if (name == null) {
-            return true;
-        }
-        String n = name.toString();
-        if (n.equals(METADATA_DIR)) {
-            return true;
-        }
-        try {
-            // Skip OS hidden/system files (e.g. Thumbs.db, .DS_Store) — not user content.
-            if (Files.isHidden(entry)) {
-                return true;
-            }
-        } catch (IOException ignored) {
-            // If we cannot tell, err on the side of including it so nothing is silently lost.
-        }
-        return false;
+        return name == null || name.toString().equals(METADATA_DIR);
     }
 }

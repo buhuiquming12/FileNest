@@ -19,11 +19,11 @@ public class App extends Application {
         OrganizeService service = OrganizeService.createDefault();
         MainView view = new MainView(service, stage);
 
-        Scene scene = new Scene(view.getRoot(), 1000, 660);
-        stage.setTitle("FileNest · 桌面文件整理工具（AI 建议）");
+        Scene scene = new Scene(view.getRoot(), 1180, 720);
+        stage.setTitle("FileNest · 文件夹占用与 AI 清理建议");
         stage.setScene(scene);
-        stage.setMinWidth(820);
-        stage.setMinHeight(520);
+        stage.setMinWidth(980);
+        stage.setMinHeight(600);
         stage.show();
     }
 

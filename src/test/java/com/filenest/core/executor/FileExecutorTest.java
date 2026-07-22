@@ -79,4 +79,41 @@ class FileExecutorTest {
         assertTrue(Files.exists(src), "source stays put when skipping a conflict");
         assertEquals("OLD", Files.readString(target));
     }
+
+    @Test
+    void rejectsTargetOutsideSourceRoot(@TempDir Path dir) throws IOException {
+        JsonOperationLog log = new JsonOperationLog(dir.resolve("ops.json"));
+        FileExecutor exec = new FileExecutor(log);
+        Path root = Files.createDirectory(dir.resolve("root"));
+        Path source = Files.writeString(root.resolve("a.txt"), "data");
+        Path outside = dir.resolve("outside/a.txt");
+
+        OrganizeResult result = exec.execute(List.of(FileAction.rule(source, outside,
+                ActionType.MOVE, "escape", false)), ConflictPolicy.RENAME);
+
+        assertEquals(1, result.failed());
+        assertTrue(Files.exists(source));
+        assertFalse(Files.exists(outside));
+        assertTrue(log.history().isEmpty());
+    }
+
+    @Test
+    void rejectsSymlinkSourceWhenSupported(@TempDir Path dir) throws IOException {
+        JsonOperationLog log = new JsonOperationLog(dir.resolve("ops.json"));
+        FileExecutor exec = new FileExecutor(log);
+        Path real = Files.writeString(dir.resolve("real.txt"), "data");
+        Path link = dir.resolve("link.txt");
+        try {
+            Files.createSymbolicLink(link, real);
+        } catch (UnsupportedOperationException | IOException | SecurityException ignored) {
+            return;
+        }
+
+        OrganizeResult result = exec.execute(List.of(FileAction.rule(link, dir.resolve("docs/link.txt"),
+                ActionType.MOVE, "link", false)), ConflictPolicy.RENAME);
+
+        assertEquals(1, result.failed());
+        assertTrue(Files.exists(link));
+        assertFalse(Files.exists(dir.resolve("docs/link.txt")));
+    }
 }

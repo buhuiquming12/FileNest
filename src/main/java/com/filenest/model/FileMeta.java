@@ -19,7 +19,8 @@ public record FileMeta(
         String extension,   // lower-case, without the dot; "" when the file has none
         long size,          // bytes
         Instant lastModified,
-        boolean directory
+        boolean directory,
+        boolean hidden
 ) {
     /**
      * Builds a {@link FileMeta} from a path by reading its basic attributes.
@@ -33,10 +34,19 @@ public record FileMeta(
                 extensionOf(name),
                 attr.size(),
                 attr.lastModifiedTime().toInstant(),
-                attr.isDirectory()
+                attr.isDirectory(),
+                isHidden(path)
         );
     }
 
+    private static boolean isHidden(Path path) {
+        try {
+            return Files.isHidden(path);
+        } catch (IOException | SecurityException ignored) {
+            // Unknown is treated as visible for display; the executor still validates before moving.
+            return false;
+        }
+    }
     /** File name without the extension (e.g. {@code report.final.docx} -> {@code report.final}). */
     public String baseName() {
         int dot = fileName.lastIndexOf('.');

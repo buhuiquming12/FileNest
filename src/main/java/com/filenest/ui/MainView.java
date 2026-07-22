@@ -1,11 +1,15 @@
 package com.filenest.ui;
 
 import com.filenest.app.OrganizeService;
+import com.filenest.app.StorageAnalysisService;
+import com.filenest.core.executor.AutoOrganizeSafetyPolicy;
 import com.filenest.core.executor.ConflictPolicy;
+import com.filenest.core.storage.StorageScanResult;
 import com.filenest.model.FileAction;
 import com.filenest.model.OrganizeContext;
 import com.filenest.model.OrganizePlan;
 import com.filenest.model.OrganizeResult;
+import com.filenest.model.OrganizeScan;
 
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
@@ -19,11 +23,16 @@ import javafx.scene.control.ButtonType;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressIndicator;
+import javafx.scene.control.PasswordField;
 import javafx.scene.control.SelectionMode;
 import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
+import javafx.scene.control.Tab;
+import javafx.scene.control.TabPane;
 import javafx.scene.control.Tooltip;
+import javafx.scene.control.TextField;
+import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.cell.CheckBoxTableCell;
 import javafx.scene.control.cell.PropertyValueFactory;
 import javafx.scene.layout.BorderPane;
@@ -51,29 +60,57 @@ import java.util.function.Consumer;
 public final class MainView {
 
     private final OrganizeService service;
+    private final StorageAnalysisService storageService;
+    private final AutoOrganizeSafetyPolicy autoSafety = new AutoOrganizeSafetyPolicy();
     private final Stage stage;
     private final BorderPane root = new BorderPane();
 
     private final ObservableList<ActionRow> rows = FXCollections.observableArrayList();
     private final TableView<ActionRow> table = new TableView<>(rows);
+    private final ObservableList<FolderUsageRow> folderRows = FXCollections.observableArrayList();
+    private final TableView<FolderUsageRow> folderTable = new TableView<>(folderRows);
+    private final ObservableList<FileInventoryRow> fileRows = FXCollections.observableArrayList();
+    private final TableView<FileInventoryRow> fileTable = new TableView<>(fileRows);
+    private final ObservableList<CleanupAdviceRow> cleanupAdviceRows = FXCollections.observableArrayList();
+    private final TableView<CleanupAdviceRow> cleanupAdviceTable = new TableView<>(cleanupAdviceRows);
+    private final TabPane tabs = new TabPane();
 
     private final Label pathLabel = new Label("尚未选择目录");
     private final ComboBox<OrganizeContext.Scheme> schemeBox = new ComboBox<>();
     private final ComboBox<ConflictPolicy> conflictBox = new ComboBox<>();
     private final Label statusLabel = new Label();
     private final Label advisorLabel = new Label();
+    private final Label folderSizeLabel = new Label("文件夹大小：—");
+    private final TextField aiUrlField = new TextField(env("FILENEST_LLM_ENDPOINT"));
+    private final PasswordField aiKeyField = new PasswordField();
+    private final ComboBox<String> aiModelBox = new ComboBox<>();
     private final ProgressIndicator progress = new ProgressIndicator();
 
-    private final Button scanButton = new Button("扫描并生成计划");
+    private final Button scanButton = new Button("扫描文件夹占用");
+    private final Button suggestButton = new Button("生成整理建议");
+    private final Button cleanupAdviceButton = new Button("AI 清理建议");
     private final Button executeButton = new Button("执行选中…");
+    private final Button ruleAutoButton = new Button("规则安全自动整理");
+    private final Button aiAutoButton = new Button("AI 建议自动整理");
     private final Button undoButton = new Button("撤销上次整理");
     private final Button selectAllButton = new Button("全选");
     private final Button selectNoneButton = new Button("全不选");
 
+    private final Button applyAiButton = new Button("应用 AI API");
+    private final Button fetchModelsButton = new Button("获取模型");
+    private final Button cleanupButton = new Button("C 盘清理…");
+
     private Path currentDir;
+    private OrganizeScan currentOrganizeScan;
+    private StorageScanResult currentStorageScan;
 
     public MainView(OrganizeService service, Stage stage) {
+        this(service, new StorageAnalysisService(), stage);
+    }
+
+    public MainView(OrganizeService service, StorageAnalysisService storageService, Stage stage) {
         this.service = service;
+        this.storageService = storageService;
         this.stage = stage;
         build();
     }
@@ -85,8 +122,8 @@ public final class MainView {
     // ---- layout -----------------------------------------------------------------------
 
     private void build() {
-        root.setTop(buildTopBar());
-        root.setCenter(buildTable());
+        root.setTop(new VBox(7, buildTopBar(), buildAiBar()));
+        root.setCenter(buildTabs());
         root.setBottom(buildBottomArea());
         root.setPadding(new Insets(10));
 
@@ -96,7 +133,13 @@ public final class MainView {
         executeButton.setDefaultButton(true);
         executeButton.setStyle("-fx-font-weight: bold;");
         scanButton.setDisable(true);
+        suggestButton.setDisable(true);
+        cleanupAdviceButton.setDisable(true);
         executeButton.setDisable(true);
+        ruleAutoButton.setDisable(true);
+        aiAutoButton.setDisable(true);
+        ruleAutoButton.setTooltip(new Tooltip("仅执行已知类型、无需额外确认的规则建议"));
+        aiAutoButton.setTooltip(new Tooltip("仅执行置信度不低于 80% 且通过安全检查的 AI 建议"));
 
         advisorLabel.setText("AI: " + service.advisorName()
                 + (service.advisorAvailable() ? "" : "（当前不可用，仅用规则）"));
@@ -128,17 +171,130 @@ public final class MainView {
         pathLabel.setStyle("-fx-text-fill: #444; -fx-border-color: #ddd; -fx-border-radius: 4; "
                 + "-fx-padding: 4 8; -fx-background-color: #fafafa;");
 
-        HBox bar = new HBox(8, chooseButton, pathLabel, new Label("整理方式:"), schemeBox, scanButton);
+        folderSizeLabel.setStyle("-fx-text-fill: #1565c0; -fx-font-size: 11;");
+        HBox bar = new HBox(8, chooseButton, pathLabel, folderSizeLabel,
+                new Label("整理方式:"), schemeBox, scanButton, suggestButton, cleanupAdviceButton, cleanupButton);
         bar.setAlignment(Pos.CENTER_LEFT);
-        bar.setPadding(new Insets(0, 0, 10, 0));
         return bar;
+    }
+
+    private HBox buildAiBar() {
+        aiUrlField.setPromptText("例如 https://api.example.com/v1/chat/completions（留空使用本地 AI）");
+        aiKeyField.setPromptText("可选，本地 API 可留空");
+        aiKeyField.setText(env("FILENEST_LLM_API_KEY"));
+        String initialModel = envOr("FILENEST_LLM_MODEL", "gpt-4o-mini");
+        aiModelBox.setEditable(true);
+        aiModelBox.getItems().setAll(initialModel);
+        aiModelBox.getSelectionModel().select(initialModel);
+        aiModelBox.getEditor().setText(initialModel);
+        aiModelBox.setPromptText("模型名");
+        aiUrlField.setPrefWidth(340);
+        aiKeyField.setPrefWidth(150);
+        aiModelBox.setPrefWidth(165);
+        HBox.setHgrow(aiUrlField, Priority.ALWAYS);
+
+        HBox bar = new HBox(7, new Label("AI API 地址:"), aiUrlField,
+                new Label("Key:"), aiKeyField, new Label("模型:"), aiModelBox,
+                fetchModelsButton, applyAiButton);
+        bar.setAlignment(Pos.CENTER_LEFT);
+        bar.setPadding(new Insets(0, 0, 9, 0));
+        return bar;
+    }
+
+    private TabPane buildTabs() {
+        Tab usageTab = new Tab("文件夹占用", buildFolderTable());
+        Tab inventoryTab = new Tab("全部文件（当前目录）", buildFileInventoryTable());
+        Tab organizeTab = new Tab("整理建议", buildTable());
+        Tab cleanupTab = new Tab("清理建议（仅预览）", buildCleanupAdviceTable());
+        usageTab.setClosable(false);
+        inventoryTab.setClosable(false);
+        organizeTab.setClosable(false);
+        cleanupTab.setClosable(false);
+        tabs.getTabs().setAll(usageTab, inventoryTab, organizeTab, cleanupTab);
+        return tabs;
+    }
+
+    private TableView<FolderUsageRow> buildFolderTable() {
+        folderTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        folderTable.setPlaceholder(new Label("点击“扫描文件夹占用”查看各子文件夹大小"));
+        TableColumn<FolderUsageRow, String> folder = new TableColumn<>("文件夹");
+        folder.setCellValueFactory(new PropertyValueFactory<>("folder"));
+        TableColumn<FolderUsageRow, String> size = new TableColumn<>("占用大小");
+        size.setCellValueFactory(new PropertyValueFactory<>("size"));
+        TableColumn<FolderUsageRow, Number> percent = new TableColumn<>("占比");
+        percent.setCellValueFactory(new PropertyValueFactory<>("percent"));
+        percent.setCellFactory(col -> new TableCell<>() {
+            @Override protected void updateItem(Number value, boolean empty) {
+                super.updateItem(value, empty);
+                setText(empty || value == null ? null : String.format("%.1f%%", value.doubleValue()));
+            }
+        });
+        TableColumn<FolderUsageRow, Number> files = new TableColumn<>("文件数");
+        files.setCellValueFactory(new PropertyValueFactory<>("fileCount"));
+        TableColumn<FolderUsageRow, Number> folders = new TableColumn<>("子文件夹数");
+        folders.setCellValueFactory(new PropertyValueFactory<>("folderCount"));
+        TableColumn<FolderUsageRow, String> path = new TableColumn<>("完整路径");
+        path.setCellValueFactory(new PropertyValueFactory<>("path"));
+        folderTable.getColumns().setAll(List.of(folder, size, percent, files, folders, path));
+        folder.setPrefWidth(180); path.setPrefWidth(380);
+        return folderTable;
+    }
+
+
+    private TableView<FileInventoryRow> buildFileInventoryTable() {
+        fileTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        fileTable.setPlaceholder(new Label("扫描后显示当前目录顶层的全部文件，包括未知类型和隐藏文件"));
+        TableColumn<FileInventoryRow, String> name = new TableColumn<>("文件名");
+        name.setCellValueFactory(new PropertyValueFactory<>("fileName"));
+        TableColumn<FileInventoryRow, String> type = new TableColumn<>("扩展名/类型");
+        type.setCellValueFactory(new PropertyValueFactory<>("type"));
+        TableColumn<FileInventoryRow, String> category = new TableColumn<>("分类");
+        category.setCellValueFactory(new PropertyValueFactory<>("category"));
+        TableColumn<FileInventoryRow, String> size = new TableColumn<>("大小");
+        size.setCellValueFactory(new PropertyValueFactory<>("size"));
+        TableColumn<FileInventoryRow, String> modified = new TableColumn<>("修改时间");
+        modified.setCellValueFactory(new PropertyValueFactory<>("modified"));
+        TableColumn<FileInventoryRow, String> safety = new TableColumn<>("安全状态");
+        safety.setCellValueFactory(new PropertyValueFactory<>("safety"));
+        fileTable.getColumns().setAll(List.of(name, type, category, size, modified, safety));
+        name.setPrefWidth(260);
+        safety.setPrefWidth(220);
+        return fileTable;
+    }
+
+    private TableView<CleanupAdviceRow> buildCleanupAdviceTable() {
+        cleanupAdviceTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        cleanupAdviceTable.setPlaceholder(new Label("先扫描，再点击“AI 清理建议”；建议不会自动删除文件"));
+        TableColumn<CleanupAdviceRow, String> path = new TableColumn<>("文件/文件夹");
+        path.setCellValueFactory(new PropertyValueFactory<>("path"));
+        TableColumn<CleanupAdviceRow, String> size = new TableColumn<>("大小");
+        size.setCellValueFactory(new PropertyValueFactory<>("size"));
+        TableColumn<CleanupAdviceRow, String> decision = new TableColumn<>("结论");
+        decision.setCellValueFactory(new PropertyValueFactory<>("decision"));
+        decision.setCellFactory(col -> cleanupDecisionCell());
+        TableColumn<CleanupAdviceRow, String> reason = new TableColumn<>("建议与风险");
+        reason.setCellValueFactory(new PropertyValueFactory<>("reason"));
+        reason.setCellFactory(col -> cleanupWrappingCell());
+        TableColumn<CleanupAdviceRow, Number> confidence = new TableColumn<>("置信度");
+        confidence.setCellValueFactory(new PropertyValueFactory<>("confidence"));
+        confidence.setCellFactory(col -> new TableCell<>() {
+            @Override protected void updateItem(Number value, boolean empty) {
+                super.updateItem(value, empty);
+                setText(empty || value == null ? null : value.intValue() + "%");
+            }
+        });
+        TableColumn<CleanupAdviceRow, String> source = new TableColumn<>("来源");
+        source.setCellValueFactory(new PropertyValueFactory<>("source"));
+        cleanupAdviceTable.getColumns().setAll(List.of(path, size, decision, reason, confidence, source));
+        path.setPrefWidth(250); reason.setPrefWidth(390);
+        return cleanupAdviceTable;
     }
 
     private TableView<ActionRow> buildTable() {
         table.setEditable(true);
         table.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
-        table.setPlaceholder(new Label("选择一个目录并点击“扫描并生成计划”"));
+        table.setPlaceholder(new Label("先扫描文件夹，再点击“生成整理建议”"));
 
         TableColumn<ActionRow, Boolean> selectCol = new TableColumn<>("整理");
         selectCol.setCellValueFactory(cd -> cd.getValue().selectedProperty());
@@ -197,7 +353,8 @@ public final class MainView {
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
-        HBox actionBar = new HBox(8, selectAllButton, selectNoneButton, spacer,
+        HBox actionBar = new HBox(8, selectAllButton, selectNoneButton,
+                ruleAutoButton, aiAutoButton, spacer,
                 new Label("冲突处理:"), conflictBox, undoButton, executeButton);
         actionBar.setAlignment(Pos.CENTER_LEFT);
         actionBar.setPadding(new Insets(10, 0, 6, 0));
@@ -213,54 +370,199 @@ public final class MainView {
 
     private void wireActions() {
         scanButton.setOnAction(e -> scan());
+        suggestButton.setOnAction(e -> generateOrganizeSuggestions());
+        cleanupAdviceButton.setOnAction(e -> generateCleanupAdvice());
         executeButton.setOnAction(e -> execute());
+        ruleAutoButton.setOnAction(e -> autoOrganize(AutoOrganizeSafetyPolicy.Mode.RULES));
+        aiAutoButton.setOnAction(e -> autoOrganize(AutoOrganizeSafetyPolicy.Mode.AI));
         undoButton.setOnAction(e -> undo());
         selectAllButton.setOnAction(e -> setAll(true));
         selectNoneButton.setOnAction(e -> setAll(false));
+        fetchModelsButton.setOnAction(e -> fetchModels());
+        applyAiButton.setOnAction(e -> applyAiConfiguration());
+        cleanupButton.setOnAction(e -> new CleanupDialog(stage).show());
     }
 
     // ---- actions ----------------------------------------------------------------------
 
     private void chooseDirectory() {
         DirectoryChooser chooser = new DirectoryChooser();
-        chooser.setTitle("选择要整理的文件夹");
+        chooser.setTitle("选择要分析的文件夹");
         if (currentDir != null) {
             File cur = currentDir.toFile();
-            if (cur.isDirectory()) {
-                chooser.setInitialDirectory(cur);
-            }
+            if (cur.isDirectory()) chooser.setInitialDirectory(cur);
         }
         File chosen = chooser.showDialog(stage);
         if (chosen != null) {
-            currentDir = chosen.toPath();
+            currentDir = chosen.toPath().toAbsolutePath().normalize();
+            currentOrganizeScan = null;
+            currentStorageScan = null;
             pathLabel.setText(currentDir.toString());
-            scanButton.setDisable(false);
+            folderSizeLabel.setText("文件夹大小：—");
             rows.clear();
+            folderRows.clear();
+            fileRows.clear();
+            cleanupAdviceRows.clear();
+            scanButton.setDisable(false);
+            suggestButton.setDisable(true);
+            cleanupAdviceButton.setDisable(true);
             executeButton.setDisable(true);
-            statusLabel.setText("已选择目录，点击“扫描并生成计划”。");
+            ruleAutoButton.setDisable(true);
+            aiAutoButton.setDisable(true);
+            statusLabel.setText("已选择目录。先扫描占用，再按需获取整理建议或 AI 清理建议。");
+            tabs.getSelectionModel().select(0);
         }
     }
 
+    private String selectedModel() {
+        String editorText = aiModelBox.getEditor().getText();
+        if (editorText != null && !editorText.isBlank()) return editorText.trim();
+        String value = aiModelBox.getValue();
+        return value == null || value.isBlank() ? "gpt-4o-mini" : value.trim();
+    }
+
+    private void fetchModels() {
+        String endpoint = aiUrlField.getText();
+        String key = aiKeyField.getText();
+        runAsync("正在从 URL 获取模型列表…",
+                () -> storageService.fetchModels(endpoint, key), models -> {
+                    String previous = selectedModel();
+                    aiModelBox.getItems().setAll(models);
+                    String selected = models.contains(previous) ? previous : models.get(0);
+                    aiModelBox.getSelectionModel().select(selected);
+                    aiModelBox.getEditor().setText(selected);
+                    statusLabel.setText("已获取 " + models.size() + " 个模型，请选择后点击“应用 AI API”。");
+                });
+    }
+
+    private void applyAiConfiguration() {
+        try {
+            String model = selectedModel();
+            service.configureAiApi(aiUrlField.getText(), aiKeyField.getText(), model);
+            storageService.configureAi(aiUrlField.getText(), aiKeyField.getText(), model);
+            advisorLabel.setText("AI: " + service.advisorName()
+                    + (service.advisorAvailable() ? "" : "（当前不可用，仅用规则）"));
+            statusLabel.setText(aiUrlField.getText() == null || aiUrlField.getText().isBlank()
+                    ? "已切换为本地离线建议。"
+                    : "已应用 URL AI；整理建议与清理建议会独立调用，异常时自动降级。");
+        } catch (IllegalArgumentException ex) {
+            error(ex.getMessage());
+        }
+    }
+
+    /** Scans facts only. It does not run classification or any AI advisor. */
     private void scan() {
-        if (currentDir == null) {
+        if (currentDir == null) return;
+        OrganizeContext ctx = new OrganizeContext(currentDir, schemeBox.getValue());
+        Path dir = currentDir;
+        currentOrganizeScan = null;
+        currentStorageScan = null;
+        rows.clear();
+        folderRows.clear();
+        fileRows.clear();
+        cleanupAdviceRows.clear();
+        executeButton.setDisable(true);
+        ruleAutoButton.setDisable(true);
+        aiAutoButton.setDisable(true);
+        folderSizeLabel.setText("文件夹大小：扫描中…");
+        runAsync("正在扫描文件与各文件夹占用…",
+                () -> new MainScan(service.scan(ctx), storageService.scan(dir)), result -> {
+                    if (!dir.equals(currentDir)) return;
+                    currentOrganizeScan = result.organizeScan();
+                    currentStorageScan = result.storageScan();
+                    fileRows.setAll(result.organizeScan().files().stream().map(FileInventoryRow::new).toList());
+                    folderRows.setAll(result.storageScan().folders().stream()
+                            .map(usage -> new FolderUsageRow(usage, result.storageScan())).toList());
+                    folderSizeLabel.setText("文件夹大小：" + result.storageScan().total().displayText());
+                    suggestButton.setDisable(false);
+                    cleanupAdviceButton.setDisable(false);
+                    tabs.getSelectionModel().select(0);
+                    statusLabel.setText(String.format(
+                            "扫描完成：%,d 个文件、%,d 个子文件夹；现在可分别生成整理建议或 AI 清理建议。",
+                            result.storageScan().total().fileCount(), result.storageScan().total().folderCount()));
+                });
+    }
+
+    /** Uses the prior scan; no filesystem scan is hidden inside this action. */
+    private void generateOrganizeSuggestions() {
+        if (currentDir == null || currentOrganizeScan == null) {
+            info("请先扫描当前文件夹。");
             return;
         }
         OrganizeContext ctx = new OrganizeContext(currentDir, schemeBox.getValue());
         Path dir = currentDir;
-        runAsync("正在扫描并生成计划…",
-                () -> service.plan(ctx),
-                (OrganizePlan plan) -> {
-                    rows.clear();
-                    for (FileAction action : plan.actions()) {
-                        rows.add(new ActionRow(action, dir));
-                    }
-                    long effective = plan.effectiveActions().size();
-                    long preChecked = rows.stream().filter(ActionRow::isSelected).count();
-                    executeButton.setDisable(rows.isEmpty());
-                    statusLabel.setText(String.format(
-                            "共 %d 项建议，其中 %d 项可整理，已默认勾选 %d 项（需确认的项默认不勾选）。",
-                            rows.size(), effective, preChecked));
-                });
+        OrganizeScan scan = currentOrganizeScan;
+        runAsync("正在生成整理建议…", () -> service.suggest(scan, ctx), plan -> {
+            rows.clear();
+            for (FileAction action : plan.actions()) rows.add(new ActionRow(action, dir));
+            long effective = plan.effectiveActions().size();
+            long preChecked = rows.stream().filter(ActionRow::isSelected).count();
+            executeButton.setDisable(rows.isEmpty());
+            ruleAutoButton.setDisable(rows.isEmpty());
+            aiAutoButton.setDisable(rows.isEmpty());
+            tabs.getSelectionModel().select(2);
+            statusLabel.setText(String.format(
+                    "共 %d 项整理建议，其中 %d 项可整理，已默认勾选 %d 项。",
+                    rows.size(), effective, preChecked));
+        });
+    }
+
+    /** Generates read-only cleanup advice from prior scan data; it never deletes anything. */
+    private void generateCleanupAdvice() {
+        if (currentStorageScan == null) {
+            info("请先扫描当前文件夹。");
+            return;
+        }
+        StorageScanResult scan = currentStorageScan;
+        runAsync("正在生成 AI 清理建议…", () -> storageService.advise(scan), suggestions -> {
+            cleanupAdviceRows.setAll(suggestions.stream()
+                    .map(item -> new CleanupAdviceRow(item, scan.root())).toList());
+            tabs.getSelectionModel().select(3);
+            statusLabel.setText(suggestions.isEmpty()
+                    ? "未发现明确的清理候选；这通常意味着当前目录无需清理。"
+                    : "已生成 " + suggestions.size() + " 条清理建议（仅预览，不会自动删除）。");
+        });
+    }
+    private void autoOrganize(AutoOrganizeSafetyPolicy.Mode mode) {
+        if (currentDir == null || rows.isEmpty()) {
+            info("请先扫描并生成整理建议。");
+            return;
+        }
+        AutoOrganizeSafetyPolicy.Selection selection = autoSafety.select(
+                rows.stream().map(ActionRow::action).toList(), currentDir, mode);
+        if (selection.actions().isEmpty()) {
+            info(mode == AutoOrganizeSafetyPolicy.Mode.AI
+                    ? "没有置信度达到 80% 且通过安全检查的 AI 整理建议。"
+                    : "没有已知类型且通过安全检查的规则整理建议。");
+            return;
+        }
+
+        String summary = String.format(
+                "将安全移动 %d 个文件，另有 %d 项因来源、置信度或安全规则被排除。\n"
+                        + "目标冲突会自动改名，绝不覆盖；本批操作会记录并可撤销。",
+                selection.actions().size(), selection.rejectedCount());
+        if (mode == AutoOrganizeSafetyPolicy.Mode.AI) {
+            TextInputDialog dialog = new TextInputDialog();
+            dialog.setTitle("确认 AI 自动整理");
+            dialog.setHeaderText("AI 可能判断错误，请核对“整理建议”后再继续");
+            dialog.setContentText(summary + "\n\n请输入“确认AI整理”：");
+            dialog.initOwner(stage);
+            String entered = dialog.showAndWait().orElse("");
+            if (!"确认AI整理".equals(entered.trim())) {
+                statusLabel.setText("已取消 AI 自动整理：确认短语不匹配。");
+                return;
+            }
+        } else {
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, summary,
+                    ButtonType.OK, ButtonType.CANCEL);
+            confirm.setTitle("规则安全自动整理");
+            confirm.setHeaderText("执行通过安全检查的规则建议？");
+            confirm.initOwner(stage);
+            if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+        }
+        runExecution(selection.actions(), ConflictPolicy.RENAME,
+                mode == AutoOrganizeSafetyPolicy.Mode.AI ? "正在执行 AI 安全整理…" : "正在执行规则安全整理…",
+                mode == AutoOrganizeSafetyPolicy.Mode.AI ? "AI 安全整理结果" : "规则安全整理结果");
     }
 
     private void execute() {
@@ -269,17 +571,14 @@ public final class MainView {
                 .map(ActionRow::action)
                 .filter(FileAction::isEffective)
                 .toList();
-
         if (selected.isEmpty()) {
             info("没有勾选任何可整理的项。");
             return;
         }
-
         long needConfirm = rows.stream()
                 .filter(ActionRow::isSelected)
                 .filter(r -> r.action().isEffective() && r.requiresConfirm())
                 .count();
-
         StringBuilder msg = new StringBuilder("即将移动 " + selected.size() + " 个文件。");
         if (needConfirm > 0) {
             msg.append("\n其中 ").append(needConfirm).append(" 项来自 AI 建议或重复检测，请再次确认。");
@@ -287,27 +586,34 @@ public final class MainView {
         msg.append("\n\n冲突处理策略：").append(conflictBox.getValue() == ConflictPolicy.RENAME
                 ? "自动重命名（不会覆盖已有文件）" : "跳过冲突项");
         msg.append("\n操作可随时通过“撤销上次整理”回退。");
-
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, msg.toString(),
                 ButtonType.OK, ButtonType.CANCEL);
         confirm.setTitle("确认整理");
         confirm.setHeaderText("确认执行整理？");
         confirm.initOwner(stage);
-        if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
-            return;
-        }
+        if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+        runExecution(selected, conflictBox.getValue(), "正在整理文件…", "整理结果");
+    }
 
-        ConflictPolicy policy = conflictBox.getValue();
-        runAsync("正在整理文件…",
-                () -> service.execute(selected, policy),
-                (OrganizeResult result) -> {
-                    rows.clear();
-                    executeButton.setDisable(true);
-                    undoButton.setDisable(!service.canUndo());
-                    statusLabel.setText(String.format("整理完成：成功 %d，跳过 %d，失败 %d。",
-                            result.succeeded(), result.skipped(), result.failed()));
-                    showResult("整理结果", result);
-                });
+    private void runExecution(List<FileAction> actions, ConflictPolicy policy, String busyMessage, String title) {
+        runAsync(busyMessage, () -> service.execute(actions, policy), (OrganizeResult result) -> {
+            rows.clear();
+            folderRows.clear();
+            fileRows.clear();
+            cleanupAdviceRows.clear();
+            currentOrganizeScan = null;
+            currentStorageScan = null;
+            folderSizeLabel.setText("文件夹大小：—");
+            executeButton.setDisable(true);
+            ruleAutoButton.setDisable(true);
+            aiAutoButton.setDisable(true);
+            suggestButton.setDisable(true);
+            cleanupAdviceButton.setDisable(true);
+            undoButton.setDisable(!service.canUndo());
+            statusLabel.setText(String.format("整理完成：成功 %d，跳过 %d，失败 %d；请重新扫描更新占用。",
+                    result.succeeded(), result.skipped(), result.failed()));
+            showResult(title, result);
+        });
     }
 
     private void undo() {
@@ -329,8 +635,20 @@ public final class MainView {
         runAsync("正在撤销…",
                 () -> service.undoLast(policy),
                 (OrganizeResult result) -> {
+                    currentOrganizeScan = null;
+                    currentStorageScan = null;
+                    rows.clear();
+                    folderRows.clear();
+                    fileRows.clear();
+                    cleanupAdviceRows.clear();
+                    folderSizeLabel.setText("文件夹大小：—");
+                    suggestButton.setDisable(true);
+                    cleanupAdviceButton.setDisable(true);
+                    executeButton.setDisable(true);
+                    ruleAutoButton.setDisable(true);
+                    aiAutoButton.setDisable(true);
                     undoButton.setDisable(!service.canUndo());
-                    statusLabel.setText(String.format("撤销完成：成功 %d，跳过 %d，失败 %d。",
+                    statusLabel.setText(String.format("撤销完成：成功 %d，跳过 %d，失败 %d；请重新扫描更新占用。",
                             result.succeeded(), result.skipped(), result.failed()));
                     showResult("撤销结果", result);
                 });
@@ -372,10 +690,17 @@ public final class MainView {
         Platform.runLater(() -> {
             progress.setVisible(busy);
             scanButton.setDisable(busy || currentDir == null);
+            suggestButton.setDisable(busy || currentOrganizeScan == null);
+            cleanupAdviceButton.setDisable(busy || currentStorageScan == null);
             executeButton.setDisable(busy || rows.isEmpty());
+            ruleAutoButton.setDisable(busy || rows.isEmpty());
+            aiAutoButton.setDisable(busy || rows.isEmpty());
             undoButton.setDisable(busy || !service.canUndo());
             selectAllButton.setDisable(busy);
             selectNoneButton.setDisable(busy);
+            fetchModelsButton.setDisable(busy);
+            applyAiButton.setDisable(busy);
+            cleanupButton.setDisable(busy);
             if (busy) {
                 statusLabel.setText(message);
             }
@@ -384,6 +709,33 @@ public final class MainView {
 
     // ---- table cell factories ---------------------------------------------------------
 
+    private TableCell<CleanupAdviceRow, String> cleanupWrappingCell() {
+        return new TableCell<>() {
+            private final Text text = new Text();
+            {
+                text.wrappingWidthProperty().bind(widthProperty().subtract(10));
+                setGraphic(text);
+                setPrefHeight(Region.USE_COMPUTED_SIZE);
+            }
+            @Override protected void updateItem(String value, boolean empty) {
+                super.updateItem(value, empty);
+                text.setText(empty || value == null ? "" : value);
+            }
+        };
+    }
+
+    private TableCell<CleanupAdviceRow, String> cleanupDecisionCell() {
+        return new TableCell<>() {
+            @Override protected void updateItem(String value, boolean empty) {
+                super.updateItem(value, empty);
+                if (empty || value == null) { setText(null); setStyle(""); return; }
+                setText(value);
+                String color = "可删除".equals(value) ? "#c62828"
+                        : ("建议保留".equals(value) ? "#2e7d32" : "#ef6c00");
+                setStyle("-fx-text-fill: " + color + "; -fx-font-weight: bold;");
+            }
+        };
+    }
     private TableCell<ActionRow, String> wrappingCell() {
         return new TableCell<>() {
             private final Text text = new Text();
@@ -482,4 +834,16 @@ public final class MainView {
         alert.initOwner(stage);
         alert.showAndWait();
     }
+
+    private record MainScan(OrganizeScan organizeScan, StorageScanResult storageScan) { }
+    private static String env(String name) {
+        String value = System.getenv(name);
+        return value == null ? "" : value;
+    }
+
+    private static String envOr(String name, String fallback) {
+        String value = env(name);
+        return value.isBlank() ? fallback : value;
+    }
+
 }

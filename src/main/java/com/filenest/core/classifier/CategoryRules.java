@@ -39,40 +39,40 @@ public final class CategoryRules {
         Map<String, String> m = new java.util.HashMap<>();
 
         String documents = "文档";
-        for (String e : new String[]{"doc", "docx", "pdf", "txt", "rtf", "odt", "md", "pages", "wps"}) {
+        for (String e : new String[]{"doc", "docx", "docm", "dot", "dotx", "pdf", "xps", "txt", "rtf", "odt", "md", "tex", "log", "pages", "wps"}) {
             m.put(e, documents);
         }
         String spreadsheets = "表格";
-        for (String e : new String[]{"xls", "xlsx", "csv", "ods", "numbers", "et"}) {
+        for (String e : new String[]{"xls", "xlsx", "xlsm", "xlsb", "csv", "tsv", "ods", "numbers", "et"}) {
             m.put(e, spreadsheets);
         }
         String slides = "演示";
-        for (String e : new String[]{"ppt", "pptx", "odp", "key", "dps"}) {
+        for (String e : new String[]{"ppt", "pptx", "pptm", "pps", "ppsx", "odp", "key", "dps"}) {
             m.put(e, slides);
         }
         String images = "图片";
-        for (String e : new String[]{"jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "heic", "tiff", "ico", "raw"}) {
+        for (String e : new String[]{"jpg", "jpeg", "jfif", "png", "gif", "bmp", "webp", "avif", "svg", "heic", "heif", "tif", "tiff", "ico", "raw", "dng", "cr2", "nef", "psd", "ai", "eps"}) {
             m.put(e, images);
         }
         String audio = "音频";
-        for (String e : new String[]{"mp3", "wav", "flac", "aac", "ogg", "m4a", "wma"}) {
+        for (String e : new String[]{"mp3", "wav", "flac", "aac", "ogg", "opus", "m4a", "wma", "aiff", "mid", "midi", "amr"}) {
             m.put(e, audio);
         }
         String video = "视频";
-        for (String e : new String[]{"mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg"}) {
+        for (String e : new String[]{"mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "ts", "mts", "m2ts", "3gp", "vob"}) {
             m.put(e, video);
         }
         String archives = "压缩包";
-        for (String e : new String[]{"zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso"}) {
+        for (String e : new String[]{"zip", "zipx", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "zst", "cab", "iso"}) {
             m.put(e, archives);
         }
         String programs = "程序";
-        for (String e : new String[]{"exe", "msi", "apk", "dmg", "deb", "rpm", "bat", "sh", "app"}) {
+        for (String e : new String[]{"exe", "msi", "apk", "dmg", "deb", "rpm", "bat", "cmd", "com", "ps1", "sh", "app", "appimage", "jar", "war"}) {
             m.put(e, programs);
         }
         String code = "代码";
         for (String e : new String[]{"java", "py", "js", "ts", "c", "cpp", "h", "cs", "go", "rs",
-                "rb", "php", "html", "css", "json", "xml", "yml", "yaml", "sql", "kt"}) {
+                "rb", "php", "html", "css", "scss", "sass", "jsx", "tsx", "vue", "json", "xml", "yml", "yaml", "sql", "kt", "kts", "swift", "scala", "gradle", "properties", "toml", "ini", "conf"}) {
             m.put(e, code);
         }
         String ebooks = "电子书";
@@ -80,8 +80,16 @@ public final class CategoryRules {
             m.put(e, ebooks);
         }
         String fonts = "字体";
-        for (String e : new String[]{"ttf", "otf", "woff", "woff2"}) {
+        for (String e : new String[]{"ttf", "otf", "woff", "woff2", "eot"}) {
             m.put(e, fonts);
+        }
+        String data = "数据";
+        for (String e : new String[]{"db", "sqlite", "sqlite3", "parquet", "feather", "orc", "avro"}) {
+            m.put(e, data);
+        }
+        String design3d = "设计与三维";
+        for (String e : new String[]{"stl", "obj", "fbx", "glb", "gltf", "blend", "3ds", "dwg", "dxf"}) {
+            m.put(e, design3d);
         }
         return Map.copyOf(m);
     }

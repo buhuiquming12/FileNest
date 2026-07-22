@@ -2,6 +2,7 @@ package com.filenest.app;
 
 import com.filenest.core.advisor.AiAdvisor;
 import com.filenest.core.advisor.HeuristicAiAdvisor;
+import com.filenest.core.advisor.LlmAiAdvisor;
 import com.filenest.core.advisor.NoOpAiAdvisor;
 import com.filenest.core.advisor.TimeoutAiAdvisor;
 import com.filenest.core.classifier.CategoryRules;
@@ -20,6 +21,7 @@ import com.filenest.model.OperationBatch;
 import com.filenest.model.OrganizeContext;
 import com.filenest.model.OrganizePlan;
 import com.filenest.model.OrganizeResult;
+import com.filenest.model.OrganizeScan;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -52,7 +54,8 @@ public final class OrganizeService {
     private final com.filenest.core.scanner.FileScanner scanner;
     private final ClassifierStrategy classifier;
     private final DuplicateDetector duplicateDetector;
-    private final AiAdvisor advisor;
+    private final AiAdvisor localAdvisor;
+    private volatile AiAdvisor advisor;
     private final FileExecutor executor;
     private final OperationLog log;
 
@@ -65,6 +68,7 @@ public final class OrganizeService {
         this.scanner = scanner;
         this.classifier = classifier;
         this.duplicateDetector = duplicateDetector;
+        this.localAdvisor = advisor;
         this.advisor = advisor;
         this.executor = executor;
         this.log = log;
@@ -86,23 +90,35 @@ public final class OrganizeService {
 
     // ---- planning ---------------------------------------------------------------------
 
-    /**
-     * Produces a proposed plan for the folder in {@code context}. Read-only: nothing on
-     * disk is changed here.
-     */
-    public OrganizePlan plan(OrganizeContext context) throws IOException {
-        List<FileMeta> files = scanner.scan(context.rootDir());
+    /** Scans file metadata only. No classification or AI request is performed here. */
+    public OrganizeScan scan(OrganizeContext context) throws IOException {
+        return new OrganizeScan(context.rootDir(), scanner.scan(context.rootDir()), Instant.now());
+    }
+
+    /** Generates suggestions from an existing scan without reading the directory again. */
+    public OrganizePlan suggest(OrganizeScan scan, OrganizeContext context) {
+        Path expectedRoot = context.rootDir().toAbsolutePath().normalize();
+        if (!scan.rootDir().equals(expectedRoot)) {
+            throw new IllegalArgumentException("扫描结果与当前目录不匹配，请重新扫描");
+        }
+        List<FileMeta> files = scan.files();
+        List<FileMeta> organizableFiles = files.stream().filter(file -> !isProtected(file)).toList();
 
         // Keyed by source path so every file has exactly one proposed action.
         Map<Path, FileAction> byPath = new LinkedHashMap<>();
 
         // 1. Deterministic base — always available.
         for (FileMeta f : files) {
-            classifier.classify(f, context).ifPresent(a -> byPath.put(f.path(), a));
+            if (isProtected(f)) {
+                byPath.put(f.path(), FileAction.skip(f.path(),
+                        "隐藏/系统配置文件：仅显示，不参与自动整理", 1.0, FileAction.Source.RULE));
+            } else {
+                classifier.classify(f, context).ifPresent(a -> byPath.put(f.path(), a));
+            }
         }
 
         // 2. Exact duplicates (deterministic) override the redundant copies.
-        for (DuplicateGroup group : duplicateDetector.detect(files)) {
+        for (DuplicateGroup group : duplicateDetector.detect(organizableFiles)) {
             for (FileMeta dup : group.duplicates()) {
                 Path target = context.rootDir().resolve(DUPLICATES_FOLDER).resolve(dup.fileName());
                 String reason = "重复文件：与「" + group.keeper().fileName() + "」内容完全相同";
@@ -112,7 +128,7 @@ public final class OrganizeService {
         }
 
         // 3. AI suggestions, merged in without ever silently overriding a good rule.
-        for (FileAction ai : advisor.suggest(files, context)) {
+        for (FileAction ai : advisor.suggest(organizableFiles, context)) {
             FileAction existing = byPath.get(ai.sourcePath());
             if (existing == null || shouldPreferAi(existing, ai, context)) {
                 byPath.put(ai.sourcePath(), ai);
@@ -126,6 +142,16 @@ public final class OrganizeService {
         return new OrganizePlan(actions, Instant.now());
     }
 
+    /** Compatibility convenience: scan first, then generate suggestions. */
+    public OrganizePlan plan(OrganizeContext context) throws IOException {
+        return suggest(scan(context), context);
+    }
+
+    private boolean isProtected(FileMeta file) {
+        String name = file.fileName().toLowerCase(java.util.Locale.ROOT);
+        return file.hidden() || name.startsWith(".") || name.equals("thumbs.db")
+                || name.equals("desktop.ini") || name.equals("ntuser.dat");
+    }
     /**
      * Decides whether an AI suggestion should replace the current (rule) action, versus
      * merely annotate it. AI never replaces a confident, meaningful rule move except where
@@ -213,5 +239,20 @@ public final class OrganizeService {
 
     public boolean advisorAvailable() {
         return advisor.available();
+    }
+
+    /** Switches suggestions to a user-supplied OpenAI-compatible HTTP endpoint. */
+    public synchronized void configureAiApi(String endpoint, String apiKey, String model) {
+        if (endpoint == null || endpoint.isBlank()) {
+            advisor = localAdvisor;
+            return;
+        }
+        AiAdvisor remote = new LlmAiAdvisor(endpoint, apiKey, model);
+        advisor = new TimeoutAiAdvisor(remote, localAdvisor, Duration.ofSeconds(30));
+    }
+
+    /** Restores the offline local advisor without affecting rule-based planning. */
+    public synchronized void useLocalAdvisor() {
+        advisor = localAdvisor;
     }
 }
