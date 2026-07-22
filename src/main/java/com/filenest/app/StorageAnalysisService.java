@@ -16,7 +16,7 @@ import java.util.Map;
 
 /** Keeps disk scanning, cleanup advice, and URL model discovery as separate operations. */
 public final class StorageAnalysisService {
-    private static final int LARGE_FILE_LIMIT = 100;
+    private static final int LARGE_FILE_LIMIT = 500;
     private final FolderSizeService scanner;
     private final CleanupAdvisor localAdvisor;
     private final UrlModelCatalog modelCatalog;
@@ -47,12 +47,33 @@ public final class StorageAnalysisService {
             List<CleanupSuggestion> ai = remote.suggest(scan);
             if (ai.isEmpty()) return local;
             Map<Path, CleanupSuggestion> merged = new LinkedHashMap<>();
-            for (CleanupSuggestion item : ai) merged.put(item.path(), item);
-            for (CleanupSuggestion item : local) merged.putIfAbsent(item.path(), item);
-            return merged.values().stream().sorted((a, b) -> Long.compare(b.bytes(), a.bytes())).toList();
+            for (CleanupSuggestion item : local) merged.put(item.path().toAbsolutePath().normalize(), item);
+            for (CleanupSuggestion item : ai) {
+                Path path = item.path().toAbsolutePath().normalize();
+                CleanupSuggestion existing = merged.get(path);
+                // The remote model may add context, but it may never weaken a local safety verdict.
+                int aiRank = decisionRank(item.decision());
+                int localRank = existing == null ? -1 : decisionRank(existing.decision());
+                if (existing == null || aiRank > localRank
+                        || (aiRank == localRank && item.confidence() > existing.confidence())) {
+                    merged.put(path, item);
+                }
+            }
+            return merged.values().stream().sorted((a, b) -> {
+                int decision = Integer.compare(decisionRank(a.decision()), decisionRank(b.decision()));
+                return decision != 0 ? decision : Long.compare(b.bytes(), a.bytes());
+            }).toList();
         } catch (RuntimeException unavailable) {
             return local;
         }
+    }
+
+    private static int decisionRank(CleanupSuggestion.Decision decision) {
+        return switch (decision) {
+            case DELETE -> 0;
+            case REVIEW -> 1;
+            case KEEP -> 2;
+        };
     }
 
     public synchronized void configureAi(String endpoint, String apiKey, String model) {

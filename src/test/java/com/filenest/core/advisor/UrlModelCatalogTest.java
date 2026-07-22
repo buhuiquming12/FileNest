@@ -34,7 +34,7 @@ class UrlModelCatalogTest {
         });
         server.start();
 
-        String endpoint = "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions";
+        String endpoint = "http://localhost:" + server.getAddress().getPort();
         List<String> models = new UrlModelCatalog().fetch(endpoint, "secret");
 
         assertEquals(List.of("model-a", "model-b"), models);

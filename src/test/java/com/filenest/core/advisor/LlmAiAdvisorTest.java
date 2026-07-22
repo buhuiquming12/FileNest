@@ -40,8 +40,7 @@ class LlmAiAdvisorTest {
         server.start();
         try {
             Path source = Files.writeString(temp.resolve("notes.txt"), "hello");
-            String endpoint = "http://127.0.0.1:" + server.getAddress().getPort()
-                    + "/v1/chat/completions";
+            String endpoint = "http://127.0.0.1:" + server.getAddress().getPort();
             LlmAiAdvisor advisor = new LlmAiAdvisor(endpoint, "secret", "test-model");
 
             List<FileAction> actions = advisor.suggest(List.of(FileMeta.of(source)),

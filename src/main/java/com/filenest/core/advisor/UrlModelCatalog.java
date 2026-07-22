@@ -12,7 +12,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 
 /** Fetches model names from OpenAI-compatible /models and Ollama /api/tags endpoints. */
@@ -76,26 +75,7 @@ public final class UrlModelCatalog {
     }
 
     private List<URI> candidateUris(URI endpoint) throws Exception {
-        String path = endpoint.getPath() == null ? "" : endpoint.getPath();
-        String cleanPath = path.replaceAll("/+$", "");
-        String lower = cleanPath.toLowerCase(Locale.ROOT);
-        String primary;
-        if (lower.endsWith("/chat/completions")) {
-            primary = cleanPath.substring(0, cleanPath.length() - "/chat/completions".length()) + "/models";
-        } else if (lower.endsWith("/responses")) {
-            primary = cleanPath.substring(0, cleanPath.length() - "/responses".length()) + "/models";
-        } else if (lower.endsWith("/api/chat")) {
-            primary = cleanPath.substring(0, cleanPath.length() - "/api/chat".length()) + "/api/tags";
-        } else if (lower.endsWith("/api/generate")) {
-            primary = cleanPath.substring(0, cleanPath.length() - "/api/generate".length()) + "/api/tags";
-        } else if (lower.endsWith("/models") || lower.endsWith("/api/tags")) {
-            primary = cleanPath;
-        } else if (lower.endsWith("/v1")) {
-            primary = cleanPath + "/models";
-        } else {
-            primary = cleanPath + "/models";
-        }
-        URI first = new URI(endpoint.getScheme(), endpoint.getAuthority(), primary, null, null);
+        URI first = ApiEndpointResolver.models(endpoint.toString());
         URI ollama = new URI(endpoint.getScheme(), endpoint.getAuthority(), "/api/tags", null, null);
         return first.equals(ollama) ? List.of(first) : List.of(first, ollama);
     }

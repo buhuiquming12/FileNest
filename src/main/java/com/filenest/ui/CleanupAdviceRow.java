@@ -8,16 +8,17 @@ import java.nio.file.Path;
 /** Formatted read-only cleanup-advice row. */
 public final class CleanupAdviceRow {
     private final CleanupSuggestion suggestion;
-    private final Path root;
 
-    public CleanupAdviceRow(CleanupSuggestion suggestion, Path root) {
+    public CleanupAdviceRow(CleanupSuggestion suggestion) {
         this.suggestion = suggestion;
-        this.root = root;
     }
 
     public String getPath() {
-        try { return root.relativize(suggestion.path()).toString(); }
-        catch (RuntimeException ex) { return suggestion.path().toString(); }
+        return getTargetPath().toString();
+    }
+
+    public Path getTargetPath() {
+        return suggestion.path().toAbsolutePath().normalize();
     }
     public String getSize() { return FolderSizeService.formatBytes(suggestion.bytes()); }
     public String getDecision() { return suggestion.decision().label(); }

@@ -29,4 +29,19 @@ class HeuristicCleanupAdvisorTest {
         assertEquals(CleanupSuggestion.Decision.DELETE, item.decision());
         assertTrue(Files.exists(data), "advice must not mutate the filesystem");
     }
+
+    @Test
+    void findsNestedBuildFolderAndUsesAbsolutePaths() throws Exception {
+        Path build = Files.createDirectories(temp.resolve("projects/demo/target/classes"));
+        Files.write(build.resolve("app.bin"), new byte[24]);
+        StorageScanResult scan = new FolderSizeService().scan(temp, 10);
+
+        List<CleanupSuggestion> suggestions = new HeuristicCleanupAdvisor().suggest(scan);
+
+        CleanupSuggestion item = suggestions.stream()
+                .filter(suggestion -> suggestion.path().equals(temp.resolve("projects/demo/target").toAbsolutePath().normalize()))
+                .findFirst().orElseThrow();
+        assertEquals(CleanupSuggestion.Decision.REVIEW, item.decision());
+        assertTrue(item.path().isAbsolute());
+    }
 }

@@ -31,10 +31,9 @@ public final class LlmCleanupAdvisor implements CleanupAdvisor {
     private final HttpClient client;
 
     public LlmCleanupAdvisor(String endpoint, String apiKey, String model) {
-        this.endpoint = endpoint == null ? "" : endpoint.trim();
+        this.endpoint = ApiEndpointResolver.chatCompletions(endpoint);
         this.apiKey = apiKey == null ? "" : apiKey.trim();
         this.model = model == null || model.isBlank() ? "gpt-4o-mini" : model.trim();
-        validateEndpoint(this.endpoint);
         client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     }
 
@@ -53,13 +52,25 @@ public final class LlmCleanupAdvisor implements CleanupAdvisor {
     }
 
     private String buildPrompt(StorageScanResult scan) {
-        StringBuilder out = new StringBuilder("你是谨慎的磁盘清理顾问，只能建议，绝不能执行删除。\n")
-                .append("只返回JSON：{\"suggestions\":[{\"path\":\"扫描清单中的相对路径\",\"decision\":\"DELETE|REVIEW|KEEP\",\"confidence\":0.0,\"reason\":\"理由和风险\"}]}。\n")
-                .append("只有明确可重建的缓存或临时文件才用DELETE；用户文档、照片、源码必须KEEP或REVIEW。禁止编造路径。\n目录占用：\n");
-        scan.folders().stream().limit(100).forEach(folder -> out.append("DIR ")
-                .append(relative(scan.root(), folder.path())).append(" | ").append(folder.bytes()).append(" bytes\n"));
+        StringBuilder out = new StringBuilder("你是谨慎、全面且可操作的磁盘清理顾问，只能建议，绝不能执行删除。\n")
+                .append("只返回JSON：{\"suggestions\":[{\"path\":\"扫描清单中的相对路径\",\"decision\":\"DELETE|REVIEW|KEEP\",\"confidence\":0.0,\"reason\":\"具体操作、收益和风险\"}]}。\n")
+                .append("覆盖缓存/临时文件、开发构建产物、旧安装包和压缩包、日志/转储、大文件迁移、系统文件保护等类别。")
+                .append("只有明确可重建的缓存或临时文件才用DELETE；用户文档、照片、源码、系统和应用目录必须KEEP或REVIEW。")
+                .append("禁止编造路径；同一路径只返回一次；按预计释放空间排序，最多返回120条高价值建议。\n")
+                .append("扫描根目录：").append(scan.root()).append("\n")
+                .append("统计：").append(scan.total().fileCount()).append(" files, ")
+                .append(scan.total().folderCount()).append(" folders, ")
+                .append(scan.total().inaccessibleCount()).append(" inaccessible\n")
+                .append("一级目录：\n");
+        scan.folders().stream().limit(120).forEach(folder -> out.append("DIR ")
+                .append(relative(scan.root(), folder.path())).append(" | ").append(folder.bytes())
+                .append(" bytes | ").append(folder.fileCount()).append(" files\n"));
+        out.append("重点嵌套目录（大目录以及缓存/构建目录）：\n");
+        scan.folderSamples().stream().limit(300).forEach(folder -> out.append("DIR ")
+                .append(relative(scan.root(), folder.path())).append(" | ").append(folder.bytes())
+                .append(" bytes | ").append(folder.fileCount()).append(" files\n"));
         out.append("大文件：\n");
-        scan.largestFiles().stream().limit(100).forEach(file -> out.append("FILE ")
+        scan.largestFiles().stream().limit(250).forEach(file -> out.append("FILE ")
                 .append(relative(scan.root(), file.path())).append(" | ").append(file.bytes())
                 .append(" bytes | modified ").append(file.lastModified()).append('\n'));
         return out.toString();
@@ -101,6 +112,7 @@ public final class LlmCleanupAdvisor implements CleanupAdvisor {
 
         Map<Path, Long> inventory = new HashMap<>();
         for (FolderUsage folder : scan.folders()) inventory.put(folder.path().toAbsolutePath().normalize(), folder.bytes());
+        for (FolderUsage folder : scan.folderSamples()) inventory.put(folder.path().toAbsolutePath().normalize(), folder.bytes());
         for (LargeFileUsage file : scan.largestFiles()) inventory.put(file.path().toAbsolutePath().normalize(), file.bytes());
         List<CleanupSuggestion> result = new ArrayList<>();
         for (JsonNode item : suggestions) {
@@ -149,13 +161,6 @@ public final class LlmCleanupAdvisor implements CleanupAdvisor {
         return null;
     }
 
-    private static void validateEndpoint(String endpoint) {
-        if (endpoint == null || endpoint.isBlank()) return;
-        URI uri = URI.create(endpoint);
-        if (uri.getHost() == null || !("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))) {
-            throw new IllegalArgumentException("AI API 地址必须是有效的 http/https URL");
-        }
-    }
 
     @Override
     public String name() { return "URL AI（" + model + "）"; }

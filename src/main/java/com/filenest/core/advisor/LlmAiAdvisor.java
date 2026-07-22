@@ -47,11 +47,10 @@ public final class LlmAiAdvisor implements AiAdvisor {
     }
 
     public LlmAiAdvisor(String endpoint, String apiKey, String model) {
-        this.endpoint = endpoint == null ? "" : endpoint.trim();
+        this.endpoint = ApiEndpointResolver.chatCompletions(endpoint);
         this.apiKey = apiKey == null ? "" : apiKey.trim();
         this.model = model == null || model.isBlank() ? "gpt-4o-mini" : model.trim();
         this.client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
-        validateEndpointIfPresent();
     }
 
     @Override
@@ -215,19 +214,6 @@ public final class LlmAiAdvisor implements AiAdvisor {
         return null;
     }
 
-    private void validateEndpointIfPresent() {
-        if (endpoint.isBlank()) {
-            return;
-        }
-        URI uri = URI.create(endpoint);
-        String scheme = uri.getScheme();
-        if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
-            throw new IllegalArgumentException("AI API 地址必须以 http:// 或 https:// 开头");
-        }
-        if (uri.getHost() == null) {
-            throw new IllegalArgumentException("AI API 地址无效");
-        }
-    }
 
     @Override
     public String name() {

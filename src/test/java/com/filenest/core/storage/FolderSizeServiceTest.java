@@ -43,4 +43,20 @@ class FolderSizeServiceTest {
         assertTrue(result.folders().stream().anyMatch(row -> row.rootFiles() && row.bytes() == 5));
         assertEquals(2, result.largestFiles().size());
         assertEquals(30, result.largestFiles().get(0).bytes());
-    }}
+    }
+
+    @Test
+    void scanRetainsNestedNotableFoldersForCleanupAnalysis() throws Exception {
+        Path cache = Files.createDirectories(temp.resolve("users/alice/app/cache/deep"));
+        Files.write(cache.resolve("entry.bin"), new byte[19]);
+
+        StorageScanResult result = new FolderSizeService().scan(temp, 10);
+
+        Path expected = temp.resolve("users/alice/app/cache").toAbsolutePath().normalize();
+        FolderUsage sample = result.folderSamples().stream()
+                .filter(folder -> folder.path().equals(expected)).findFirst().orElseThrow();
+        assertEquals(19, sample.bytes());
+        assertEquals(1, sample.fileCount());
+        assertEquals(1, sample.folderCount());
+    }
+}

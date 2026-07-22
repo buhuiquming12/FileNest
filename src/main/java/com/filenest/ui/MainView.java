@@ -4,6 +4,8 @@ import com.filenest.app.OrganizeService;
 import com.filenest.app.StorageAnalysisService;
 import com.filenest.core.executor.AutoOrganizeSafetyPolicy;
 import com.filenest.core.executor.ConflictPolicy;
+import com.filenest.core.storage.CleanupSuggestion;
+import com.filenest.core.storage.FolderSizeService;
 import com.filenest.core.storage.StorageScanResult;
 import com.filenest.model.FileAction;
 import com.filenest.model.OrganizeContext;
@@ -62,6 +64,7 @@ public final class MainView {
     private final OrganizeService service;
     private final StorageAnalysisService storageService;
     private final AutoOrganizeSafetyPolicy autoSafety = new AutoOrganizeSafetyPolicy();
+    private final FileLocationOpener locationOpener = new FileLocationOpener();
     private final Stage stage;
     private final BorderPane root = new BorderPane();
 
@@ -179,7 +182,7 @@ public final class MainView {
     }
 
     private HBox buildAiBar() {
-        aiUrlField.setPromptText("例如 https://api.example.com/v1/chat/completions（留空使用本地 AI）");
+        aiUrlField.setPromptText("例如 https://api.example.com（自动补 /v1/chat/completions；留空使用本地 AI）");
         aiKeyField.setPromptText("可选，本地 API 可留空");
         aiKeyField.setText(env("FILENEST_LLM_API_KEY"));
         String initialModel = envOr("FILENEST_LLM_MODEL", "gpt-4o-mini");
@@ -265,8 +268,9 @@ public final class MainView {
     private TableView<CleanupAdviceRow> buildCleanupAdviceTable() {
         cleanupAdviceTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
         cleanupAdviceTable.setPlaceholder(new Label("先扫描，再点击“AI 清理建议”；建议不会自动删除文件"));
-        TableColumn<CleanupAdviceRow, String> path = new TableColumn<>("文件/文件夹");
+        TableColumn<CleanupAdviceRow, String> path = new TableColumn<>("完整路径");
         path.setCellValueFactory(new PropertyValueFactory<>("path"));
+        path.setCellFactory(col -> cleanupPathCell());
         TableColumn<CleanupAdviceRow, String> size = new TableColumn<>("大小");
         size.setCellValueFactory(new PropertyValueFactory<>("size"));
         TableColumn<CleanupAdviceRow, String> decision = new TableColumn<>("结论");
@@ -285,8 +289,13 @@ public final class MainView {
         });
         TableColumn<CleanupAdviceRow, String> source = new TableColumn<>("来源");
         source.setCellValueFactory(new PropertyValueFactory<>("source"));
-        cleanupAdviceTable.getColumns().setAll(List.of(path, size, decision, reason, confidence, source));
-        path.setPrefWidth(250); reason.setPrefWidth(390);
+        TableColumn<CleanupAdviceRow, Void> location = new TableColumn<>("打开位置");
+        location.setCellFactory(col -> cleanupLocationCell());
+        cleanupAdviceTable.getColumns().setAll(
+                List.of(path, size, decision, reason, confidence, source, location));
+        path.setPrefWidth(350);
+        reason.setPrefWidth(340);
+        location.setPrefWidth(92);
         return cleanupAdviceTable;
     }
 
@@ -465,7 +474,7 @@ public final class MainView {
         ruleAutoButton.setDisable(true);
         aiAutoButton.setDisable(true);
         folderSizeLabel.setText("文件夹大小：扫描中…");
-        runAsync("正在扫描文件与各文件夹占用…",
+        runAsync("正在并行扫描文件与各文件夹占用…",
                 () -> new MainScan(service.scan(ctx), storageService.scan(dir)), result -> {
                     if (!dir.equals(currentDir)) return;
                     currentOrganizeScan = result.organizeScan();
@@ -516,11 +525,19 @@ public final class MainView {
         StorageScanResult scan = currentStorageScan;
         runAsync("正在生成 AI 清理建议…", () -> storageService.advise(scan), suggestions -> {
             cleanupAdviceRows.setAll(suggestions.stream()
-                    .map(item -> new CleanupAdviceRow(item, scan.root())).toList());
+                    .map(item -> new CleanupAdviceRow(item)).toList());
             tabs.getSelectionModel().select(3);
+            long deletableCount = suggestions.stream()
+                    .filter(item -> item.decision() == CleanupSuggestion.Decision.DELETE).count();
+            long deletableBytes = suggestions.stream()
+                    .filter(item -> item.decision() == CleanupSuggestion.Decision.DELETE)
+                    .mapToLong(CleanupSuggestion::bytes).sum();
+            long reviewCount = suggestions.stream()
+                    .filter(item -> item.decision() == CleanupSuggestion.Decision.REVIEW).count();
             statusLabel.setText(suggestions.isEmpty()
                     ? "未发现明确的清理候选；这通常意味着当前目录无需清理。"
-                    : "已生成 " + suggestions.size() + " 条清理建议（仅预览，不会自动删除）。");
+                    : String.format("已生成 %d 条：可删除 %d 项（约 %s），建议检查 %d 项；仅预览，不会自动删除。",
+                    suggestions.size(), deletableCount, FolderSizeService.formatBytes(deletableBytes), reviewCount));
         });
     }
     private void autoOrganize(AutoOrganizeSafetyPolicy.Mode mode) {
@@ -708,6 +725,53 @@ public final class MainView {
     }
 
     // ---- table cell factories ---------------------------------------------------------
+
+    private TableCell<CleanupAdviceRow, Void> cleanupLocationCell() {
+        return new TableCell<>() {
+            private final Button button = new Button("打开");
+            {
+                button.setOnAction(event -> {
+                    int index = getIndex();
+                    if (index < 0 || index >= getTableView().getItems().size()) return;
+                    CleanupAdviceRow row = getTableView().getItems().get(index);
+                    try {
+                        locationOpener.open(row.getTargetPath());
+                    } catch (Exception ex) {
+                        error("无法打开位置：" + ex.getMessage());
+                    }
+                });
+            }
+            @Override protected void updateItem(Void value, boolean empty) {
+                super.updateItem(value, empty);
+                setGraphic(empty ? null : button);
+            }
+        };
+    }
+
+    private TableCell<CleanupAdviceRow, String> cleanupPathCell() {
+        return new TableCell<>() {
+            private final Text text = new Text();
+            private final Tooltip tooltip = new Tooltip();
+            {
+                text.wrappingWidthProperty().bind(widthProperty().subtract(10));
+                setGraphic(text);
+                setPrefHeight(Region.USE_COMPUTED_SIZE);
+                tooltip.setWrapText(true);
+                tooltip.setMaxWidth(720);
+            }
+            @Override protected void updateItem(String value, boolean empty) {
+                super.updateItem(value, empty);
+                String shown = empty || value == null ? "" : value;
+                text.setText(shown);
+                if (shown.isEmpty()) {
+                    setTooltip(null);
+                } else {
+                    tooltip.setText(shown);
+                    setTooltip(tooltip);
+                }
+            }
+        };
+    }
 
     private TableCell<CleanupAdviceRow, String> cleanupWrappingCell() {
         return new TableCell<>() {
