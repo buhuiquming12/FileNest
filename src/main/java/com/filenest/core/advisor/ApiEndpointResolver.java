@@ -21,11 +21,16 @@ public final class ApiEndpointResolver {
         URI endpoint = validate(input);
         String path = cleanPath(endpoint);
         String lower = path.toLowerCase(Locale.ROOT);
-        if (lower.endsWith(CHAT_COMPLETIONS) || lower.endsWith(RESPONSES)
-                || lower.endsWith("/api/chat") || lower.endsWith("/api/generate")) {
+        if (lower.endsWith(CHAT_COMPLETIONS) || lower.endsWith("/api/chat")) {
             return withPath(endpoint, path).toString();
         }
-        if (lower.endsWith(MODELS)) {
+        // This client sends a chat/messages request body. Normalize operation URLs that
+        // use a different request schema instead of preserving them and sending invalid JSON.
+        if (lower.endsWith(RESPONSES)) {
+            path = path.substring(0, path.length() - RESPONSES.length()) + CHAT_COMPLETIONS;
+        } else if (lower.endsWith("/api/generate")) {
+            path = path.substring(0, path.length() - "/api/generate".length()) + "/api/chat";
+        } else if (lower.endsWith(MODELS)) {
             path = path.substring(0, path.length() - MODELS.length()) + CHAT_COMPLETIONS;
         } else if (lower.endsWith("/v1")) {
             path += CHAT_COMPLETIONS;

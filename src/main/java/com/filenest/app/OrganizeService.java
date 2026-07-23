@@ -255,6 +255,19 @@ public final class OrganizeService {
         return advisor.available();
     }
 
+    /** Details of the latest configured URL-AI run, used to make fallback visible. */
+    public record AiRun(boolean remoteConfigured, boolean remoteSucceeded, String error) { }
+
+    public AiRun lastAiRun() {
+        AiAdvisor selected = advisor;
+        if (selected == localAdvisor) return new AiRun(false, false, null);
+        if (selected instanceof TimeoutAiAdvisor guarded) {
+            TimeoutAiAdvisor.RunStatus run = guarded.lastRun();
+            return new AiRun(true, run.succeeded(), run.error());
+        }
+        return new AiRun(true, true, null);
+    }
+
     /** Switches suggestions to a user-supplied OpenAI-compatible HTTP endpoint. */
     public synchronized void configureAiApi(String endpoint, String apiKey, String model) {
         if (endpoint == null || endpoint.isBlank()) {
@@ -262,7 +275,7 @@ public final class OrganizeService {
             return;
         }
         AiAdvisor remote = new LlmAiAdvisor(endpoint, apiKey, model);
-        advisor = new TimeoutAiAdvisor(remote, new NoOpAiAdvisor(), Duration.ofSeconds(15));
+        advisor = new TimeoutAiAdvisor(remote, new NoOpAiAdvisor(), Duration.ofSeconds(195));
     }
 
     /** Restores the offline local advisor without affecting rule-based planning. */

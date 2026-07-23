@@ -27,13 +27,15 @@ class TimeoutAiAdvisorTest {
             return List.of(FileAction.ai(Path.of("x"), Path.of("y"), ActionType.MOVE, "late", 0.9));
         };
 
-        AiAdvisor guarded = new TimeoutAiAdvisor(slow, new NoOpAiAdvisor(), Duration.ofMillis(100));
+        TimeoutAiAdvisor guarded = new TimeoutAiAdvisor(slow, new NoOpAiAdvisor(), Duration.ofMillis(100));
         long start = System.nanoTime();
         List<FileAction> out = guarded.suggest(List.of(), ctx);
         long elapsedMs = (System.nanoTime() - start) / 1_000_000;
 
         assertTrue(out.isEmpty(), "timed-out advisor degrades to the fallback (no suggestions)");
         assertTrue(elapsedMs < 1500, "must not block for the full delegate duration");
+        assertTrue(!guarded.lastRun().succeeded());
+        assertTrue(guarded.lastRun().error().contains("timed out"));
     }
 
     @Test
@@ -41,19 +43,21 @@ class TimeoutAiAdvisorTest {
         AiAdvisor broken = (files, context) -> {
             throw new IllegalStateException("boom");
         };
-        AiAdvisor guarded = new TimeoutAiAdvisor(broken, new NoOpAiAdvisor(), Duration.ofSeconds(1));
+        TimeoutAiAdvisor guarded = new TimeoutAiAdvisor(broken, new NoOpAiAdvisor(), Duration.ofSeconds(1));
 
         assertTrue(guarded.suggest(List.of(), ctx).isEmpty());
+        assertEquals("boom", guarded.lastRun().error());
     }
 
     @Test
     void fastAdvisorResultPassesThrough() {
         FileAction one = FileAction.ai(Path.of("a"), Path.of("b"), ActionType.MOVE, "quick", 0.8);
         AiAdvisor fast = (files, context) -> List.of(one);
-        AiAdvisor guarded = new TimeoutAiAdvisor(fast, new NoOpAiAdvisor(), Duration.ofSeconds(1));
+        TimeoutAiAdvisor guarded = new TimeoutAiAdvisor(fast, new NoOpAiAdvisor(), Duration.ofSeconds(1));
 
         List<FileAction> out = guarded.suggest(List.of(), ctx);
         assertEquals(1, out.size());
         assertEquals("quick", out.get(0).reason());
+        assertTrue(guarded.lastRun().succeeded());
     }
 }

@@ -26,17 +26,20 @@ public final class UrlModelCatalog {
     public List<String> fetch(String apiEndpoint, String apiKey) throws Exception {
         URI endpoint = validate(apiEndpoint);
         List<URI> candidates = candidateUris(endpoint);
+        List<String> failures = new ArrayList<>();
         Exception last = null;
         for (URI uri : candidates) {
             try {
                 List<String> models = request(uri, apiKey == null ? "" : apiKey.trim());
                 if (!models.isEmpty()) return models;
-                last = new IllegalStateException("响应中没有模型");
+                failures.add(uri + " -> response contains no models");
             } catch (Exception ex) {
                 last = ex;
+                String message = ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage();
+                failures.add(uri + " -> " + message);
             }
         }
-        throw new IllegalStateException("获取模型失败: " + (last == null ? "未知错误" : last.getMessage()), last);
+        throw new IllegalStateException("获取模型失败: " + String.join("; ", failures), last);
     }
 
     private List<String> request(URI uri, String apiKey) throws Exception {
@@ -46,7 +49,10 @@ public final class UrlModelCatalog {
         HttpResponse<String> response = client.send(builder.build(),
                 HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new IllegalStateException("HTTP " + response.statusCode() + "（" + uri + "）");
+            String snippet = response.body() == null ? "" : response.body().trim();
+            if (snippet.length() > 200) snippet = snippet.substring(0, 200) + "...";
+            throw new IllegalStateException("HTTP " + response.statusCode()
+                    + (snippet.isBlank() ? "" : ": " + snippet));
         }
         JsonNode root = JSON.readTree(response.body());
         Set<String> names = new LinkedHashSet<>();

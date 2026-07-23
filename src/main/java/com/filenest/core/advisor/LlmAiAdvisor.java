@@ -36,8 +36,8 @@ public final class LlmAiAdvisor implements AiAdvisor {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int MAX_FILES_PER_REQUEST = 60;
     private static final int MAX_REMOTE_FILES = 180;
-    private static final int MAX_PARALLEL_REQUESTS = 3;
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(12);
+    private static final int MAX_PARALLEL_REQUESTS = 1;
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(60);
 
     private final String endpoint;
     private final String apiKey;
@@ -140,7 +140,6 @@ public final class LlmAiAdvisor implements AiAdvisor {
     private String callModel(String prompt) throws Exception {
         ObjectNode body = JSON.createObjectNode();
         body.put("model", model);
-        body.put("temperature", 0);
         body.put("stream", false);
         ArrayNode messages = body.putArray("messages");
         messages.addObject().put("role", "system")
@@ -157,8 +156,7 @@ public final class LlmAiAdvisor implements AiAdvisor {
             request.header("Authorization", "Bearer " + apiKey);
         }
 
-        HttpResponse<String> response = client.send(request.build(),
-                HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        HttpResponse<String> response = LlmHttpRetry.send(client, request.build());
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             String snippet = response.body() == null ? "" : response.body();
             if (snippet.length() > 300) {
@@ -240,18 +238,10 @@ public final class LlmAiAdvisor implements AiAdvisor {
         if (!content.isTextual()) {
             throw new IllegalArgumentException("无法识别 AI API 响应格式");
         }
-        String text = stripCodeFence(content.asText().trim());
+        String text = LlmJsonText.extract(content.asText());
         return JSON.readTree(text);
     }
 
-    private String stripCodeFence(String text) {
-        if (!text.startsWith("```")) {
-            return text;
-        }
-        int firstLine = text.indexOf('\n');
-        int end = text.lastIndexOf("```");
-        return firstLine >= 0 && end > firstLine ? text.substring(firstLine + 1, end).trim() : text;
-    }
 
     private String firstText(JsonNode node, String... names) {
         for (String name : names) {

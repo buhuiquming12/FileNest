@@ -13,6 +13,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -25,7 +26,11 @@ import java.util.Map;
 /** URL-model cleanup advisor. It returns recommendations only and cannot delete files. */
 public final class LlmCleanupAdvisor implements CleanupAdvisor {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(12);
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(180);
+    private static final int MAX_TOP_LEVEL_FOLDERS = 30;
+    private static final int MAX_FOLDER_SAMPLES = 45;
+    private static final int MAX_LARGE_FILES = 45;
+    private static final int MAX_REMOTE_SUGGESTIONS = 30;
     private final String endpoint;
     private final String apiKey;
     private final String model;
@@ -47,31 +52,35 @@ public final class LlmCleanupAdvisor implements CleanupAdvisor {
         try {
             String response = call(buildPrompt(scan));
             return parse(response, scan);
+        } catch (HttpTimeoutException timeout) {
+            throw new IllegalStateException("AI 清理建议调用失败：模型在 "
+                    + REQUEST_TIMEOUT.toSeconds() + " 秒内未返回；请换用响应更快的模型", timeout);
         } catch (Exception ex) {
             throw new IllegalStateException("AI 清理建议调用失败: " + ex.getMessage(), ex);
         }
     }
 
-    private String buildPrompt(StorageScanResult scan) {
+    String buildPrompt(StorageScanResult scan) {
         StringBuilder out = new StringBuilder("你是谨慎、全面且可操作的磁盘清理顾问，只能建议，绝不能执行删除。\n")
                 .append("只返回JSON：{\"suggestions\":[{\"path\":\"扫描清单中的相对路径\",\"decision\":\"DELETE|REVIEW|KEEP\",\"confidence\":0.0,\"reason\":\"具体操作、收益和风险\"}]}。\n")
                 .append("覆盖缓存/临时文件、开发构建产物、旧安装包和压缩包、日志/转储、大文件迁移、系统文件保护等类别。")
                 .append("只有明确可重建的缓存或临时文件才用DELETE；用户文档、照片、源码、系统和应用目录必须KEEP或REVIEW。")
-                .append("禁止编造路径；同一路径只返回一次；按预计释放空间排序，最多返回120条高价值建议。\n")
+                .append("禁止编造路径；同一路径只返回一次；按预计释放空间排序，最多返回")
+                .append(MAX_REMOTE_SUGGESTIONS).append("条高价值建议。\n")
                 .append("扫描根目录：").append(scan.root()).append("\n")
                 .append("统计：").append(scan.total().fileCount()).append(" files, ")
                 .append(scan.total().folderCount()).append(" folders, ")
                 .append(scan.total().inaccessibleCount()).append(" inaccessible\n")
                 .append("一级目录：\n");
-        scan.folders().stream().limit(80).forEach(folder -> out.append("DIR ")
+        scan.folders().stream().limit(MAX_TOP_LEVEL_FOLDERS).forEach(folder -> out.append("DIR ")
                 .append(relative(scan.root(), folder.path())).append(" | ").append(folder.bytes())
                 .append(" bytes | ").append(folder.fileCount()).append(" files\n"));
         out.append("重点嵌套目录（大目录以及缓存/构建目录）：\n");
-        scan.folderSamples().stream().limit(120).forEach(folder -> out.append("DIR ")
+        scan.folderSamples().stream().limit(MAX_FOLDER_SAMPLES).forEach(folder -> out.append("DIR ")
                 .append(relative(scan.root(), folder.path())).append(" | ").append(folder.bytes())
                 .append(" bytes | ").append(folder.fileCount()).append(" files\n"));
         out.append("大文件：\n");
-        scan.largestFiles().stream().limit(120).forEach(file -> out.append("FILE ")
+        scan.largestFiles().stream().limit(MAX_LARGE_FILES).forEach(file -> out.append("FILE ")
                 .append(relative(scan.root(), file.path())).append(" | ").append(file.bytes())
                 .append(" bytes | modified ").append(file.lastModified()).append('\n'));
         return out.toString();
@@ -80,7 +89,6 @@ public final class LlmCleanupAdvisor implements CleanupAdvisor {
     private String call(String prompt) throws Exception {
         ObjectNode body = JSON.createObjectNode();
         body.put("model", model);
-        body.put("temperature", 0);
         body.put("stream", false);
         ArrayNode messages = body.putArray("messages");
         messages.addObject().put("role", "system").put("content", "Return valid JSON only. Never perform operations.");
@@ -90,10 +98,12 @@ public final class LlmCleanupAdvisor implements CleanupAdvisor {
                 .header("Accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(body), StandardCharsets.UTF_8));
         if (!apiKey.isBlank()) request.header("Authorization", "Bearer " + apiKey);
-        HttpResponse<String> response = client.send(request.build(),
-                HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        HttpResponse<String> response = LlmHttpRetry.send(client, request.build());
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new IllegalStateException("HTTP " + response.statusCode());
+            String snippet = response.body() == null ? "" : response.body().trim();
+            if (snippet.length() > 300) snippet = snippet.substring(0, 300) + "...";
+            throw new IllegalStateException("HTTP " + response.statusCode()
+                    + (snippet.isBlank() ? "" : ": " + snippet));
         }
         return response.body();
     }
@@ -106,7 +116,7 @@ public final class LlmCleanupAdvisor implements CleanupAdvisor {
             if (!content.isTextual()) content = envelope.path("message").path("content");
             if (!content.isTextual()) content = envelope.path("response");
             if (!content.isTextual()) throw new IllegalArgumentException("无法识别 AI 响应格式");
-            payload = JSON.readTree(stripFence(content.asText().trim()));
+            payload = JSON.readTree(LlmJsonText.extract(content.asText()));
         }
         JsonNode suggestions = payload.isArray() ? payload : payload.path("suggestions");
         if (!suggestions.isArray()) throw new IllegalArgumentException("AI 返回内容中没有 suggestions 数组");
@@ -147,12 +157,6 @@ public final class LlmCleanupAdvisor implements CleanupAdvisor {
         } catch (IllegalArgumentException ex) { return path.toString(); }
     }
 
-    private String stripFence(String text) {
-        if (!text.startsWith("```")) return text;
-        int first = text.indexOf('\n');
-        int end = text.lastIndexOf("```");
-        return first >= 0 && end > first ? text.substring(first + 1, end).trim() : text;
-    }
 
     private String text(JsonNode node, String... keys) {
         for (String key : keys) {

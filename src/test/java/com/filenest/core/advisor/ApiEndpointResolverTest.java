@@ -35,4 +35,12 @@ class ApiEndpointResolverTest {
         assertThrows(IllegalArgumentException.class,
                 () -> ApiEndpointResolver.chatCompletions("file:///tmp/model"));
     }
+
+    @Test
+    void normalizesOperationsWhoseRequestSchemaIsNotChatCompatible() {
+        assertEquals("https://api.example.com/v1/chat/completions",
+                ApiEndpointResolver.chatCompletions("https://api.example.com/v1/responses"));
+        assertEquals("http://localhost:11434/api/chat",
+                ApiEndpointResolver.chatCompletions("http://localhost:11434/api/generate"));
+    }
 }

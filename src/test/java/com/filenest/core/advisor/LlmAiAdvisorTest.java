@@ -26,10 +26,11 @@ class LlmAiAdvisorTest {
     @Test
     void callsOpenAiCompatibleUrlAndParsesSafeSuggestion() throws Exception {
         AtomicReference<String> authorization = new AtomicReference<>();
+        AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/v1/chat/completions", exchange -> {
             authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
-            exchange.getRequestBody().readAllBytes();
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             String content = "{\\\"suggestions\\\":[{\\\"file\\\":\\\"notes.txt\\\","
                     + "\\\"folder\\\":\\\"Project A\\\",\\\"confidence\\\":0.82,"
                     + "\\\"reason\\\":\\\"belongs together\\\"}]}";
@@ -55,6 +56,49 @@ class LlmAiAdvisorTest {
             assertEquals(temp.resolve("Project A/notes.txt").toAbsolutePath().normalize(),
                     actions.get(0).targetPath());
             assertEquals("Bearer secret", authorization.get());
+            assertTrue(!requestBody.get().contains("temperature"),
+                    "temperature must be omitted for reasoning-model compatibility");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void retriesTransientServiceUnavailableResponses() throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> {
+            int attempt = requests.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            String body;
+            int status;
+            if (attempt < 3) {
+                status = 503;
+                body = "{\"error\":{\"message\":\"worker capacity exhausted\"}}";
+                exchange.getResponseHeaders().add("Retry-After", "0");
+            } else {
+                status = 200;
+                body = "{\"suggestions\":[{\"file\":\"retry.txt\"," +
+                        "\"folder\":\"Recovered\",\"confidence\":0.9}]}";
+            }
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(status, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            Path source = Files.writeString(temp.resolve("retry.txt"), "hello");
+            LlmAiAdvisor advisor = new LlmAiAdvisor(
+                    "http://127.0.0.1:" + server.getAddress().getPort(), "", "test-model");
+
+            List<FileAction> actions = advisor.suggest(List.of(FileMeta.of(source)),
+                    OrganizeContext.byType(temp));
+
+            assertEquals(3, requests.get());
+            assertEquals(1, actions.size());
+            assertEquals(temp.resolve("Recovered/retry.txt").toAbsolutePath().normalize(),
+                    actions.get(0).targetPath());
         } finally {
             server.stop(0);
         }

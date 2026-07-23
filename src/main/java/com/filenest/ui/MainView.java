@@ -370,6 +370,17 @@ public final class MainView {
         actionBar.setPadding(new Insets(10, 0, 6, 0));
 
         statusLabel.setStyle("-fx-text-fill: #333;");
+        statusLabel.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(statusLabel, Priority.ALWAYS);
+        Tooltip statusTooltip = new Tooltip();
+        statusTooltip.textProperty().bind(statusLabel.textProperty());
+        statusTooltip.setWrapText(true);
+        statusTooltip.setMaxWidth(760);
+        statusLabel.setTooltip(statusTooltip);
+        statusLabel.setOnMouseClicked(event -> {
+            String message = statusLabel.getText();
+            if (message != null && message.contains("URL AI 调用失败")) error(message);
+        });
         HBox statusBar = new HBox(8, progress, statusLabel, new Region(), advisorLabel);
         HBox.setHgrow(statusBar.getChildren().get(2), Priority.ALWAYS);
         statusBar.setAlignment(Pos.CENTER_LEFT);
@@ -522,9 +533,15 @@ public final class MainView {
             ruleAutoButton.setDisable(rows.isEmpty());
             aiAutoButton.setDisable(rows.isEmpty());
             tabs.getSelectionModel().select(2);
+            OrganizeService.AiRun aiRun = service.lastAiRun();
+            String remoteStatus = !aiRun.remoteConfigured()
+                    ? ""
+                    : aiRun.remoteSucceeded()
+                    ? "；URL AI 调用成功"
+                    : "；URL AI 调用失败，已回退本地建议：" + aiRun.error();
             statusLabel.setText(String.format(
-                    "共 %d 项整理建议，其中 %d 项可整理，已默认勾选 %d 项。",
-                    rows.size(), effective, preChecked));
+                    "共 %d 项整理建议，其中 %d 项可整理，已默认勾选 %d 项%s。",
+                    rows.size(), effective, preChecked, remoteStatus));
         });
     }
 
