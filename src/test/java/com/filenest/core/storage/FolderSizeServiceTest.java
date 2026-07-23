@@ -5,8 +5,11 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FolderSizeServiceTest {
@@ -58,5 +61,21 @@ class FolderSizeServiceTest {
         assertEquals(19, sample.bytes());
         assertEquals(1, sample.fileCount());
         assertEquals(1, sample.folderCount());
+    }
+
+    @Test
+    void scanReportsMonotonicProgressThroughCompletion() throws Exception {
+        Files.write(Files.createDirectories(temp.resolve("first")).resolve("a.bin"), new byte[3]);
+        Files.write(Files.createDirectories(temp.resolve("second")).resolve("b.bin"), new byte[4]);
+        List<Double> progress = new ArrayList<>();
+
+        new FolderSizeService().scan(temp, 2, progress::add);
+
+        assertFalse(progress.isEmpty());
+        assertEquals(0.0, progress.get(0));
+        assertEquals(1.0, progress.get(progress.size() - 1));
+        for (int i = 1; i < progress.size(); i++) {
+            assertTrue(progress.get(i) >= progress.get(i - 1), "progress must not move backwards");
+        }
     }
 }

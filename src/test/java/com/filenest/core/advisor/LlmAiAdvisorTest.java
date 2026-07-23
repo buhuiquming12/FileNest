@@ -11,7 +11,10 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -66,5 +69,35 @@ class LlmAiAdvisorTest {
             rejected = true;
         }
         assertTrue(rejected);
+    }
+
+    @Test
+    void splitsLargeInventoriesIntoBoundedRequests() throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> {
+            requests.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            byte[] bytes = "{\"suggestions\":[]}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            List<FileMeta> files = new ArrayList<>();
+            for (int i = 0; i < 61; i++) {
+                String name = "file-" + i + ".txt";
+                files.add(new FileMeta(temp.resolve(name), name, "txt", 10, Instant.EPOCH,
+                        false, false));
+            }
+            LlmAiAdvisor advisor = new LlmAiAdvisor(
+                    "http://127.0.0.1:" + server.getAddress().getPort(), "", "test-model");
+
+            assertTrue(advisor.suggest(files, OrganizeContext.byType(temp)).isEmpty());
+            assertEquals(2, requests.get(), "61 files should be sent as two bounded requests");
+        } finally {
+            server.stop(0);
+        }
     }
 }

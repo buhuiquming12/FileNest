@@ -127,8 +127,22 @@ public final class OrganizeService {
             }
         }
 
-        // 3. AI suggestions, merged in without ever silently overriding a good rule.
-        for (FileAction ai : advisor.suggest(organizableFiles, context)) {
+        // 3. Local advice is always generated first. A configured remote model enhances
+        // it, so a timeout can never erase useful local suggestions.
+        Map<Path, FileAction> aiByPath = new LinkedHashMap<>();
+        for (FileAction ai : localAdvisor.suggest(organizableFiles, context)) {
+            aiByPath.put(ai.sourcePath(), ai);
+        }
+        AiAdvisor selectedAdvisor = advisor;
+        if (selectedAdvisor != localAdvisor) {
+            for (FileAction ai : selectedAdvisor.suggest(organizableFiles, context)) {
+                aiByPath.merge(ai.sourcePath(), ai,
+                        (local, remote) -> remote.confidence() >= local.confidence() ? remote : local);
+            }
+        }
+
+        // Merge AI advice without ever silently overriding a good deterministic rule.
+        for (FileAction ai : aiByPath.values()) {
             FileAction existing = byPath.get(ai.sourcePath());
             if (existing == null || shouldPreferAi(existing, ai, context)) {
                 byPath.put(ai.sourcePath(), ai);
@@ -248,7 +262,7 @@ public final class OrganizeService {
             return;
         }
         AiAdvisor remote = new LlmAiAdvisor(endpoint, apiKey, model);
-        advisor = new TimeoutAiAdvisor(remote, localAdvisor, Duration.ofSeconds(30));
+        advisor = new TimeoutAiAdvisor(remote, new NoOpAiAdvisor(), Duration.ofSeconds(15));
     }
 
     /** Restores the offline local advisor without affecting rule-based planning. */

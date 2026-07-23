@@ -19,9 +19,12 @@ import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.DoubleConsumer;
 
 /** Read-only recursive folder measurement that does not follow symbolic links. */
 public final class FolderSizeService {
@@ -48,10 +51,20 @@ public final class FolderSizeService {
      * without flooding a hard disk with random I/O. Symbolic links are never followed.
      */
     public StorageScanResult scan(Path root, int largestFileLimit) throws IOException {
+        return scan(root, largestFileLimit, ignored -> { });
+    }
+
+    /**
+     * Scans with a best-effort progress callback. Progress is reported after each direct
+     * child tree completes, so callers can show a determinate bar without traversing twice.
+     */
+    public StorageScanResult scan(Path root, int largestFileLimit, DoubleConsumer progress) throws IOException {
         if (root == null || !Files.isDirectory(root)) {
             throw new IOException("目录不存在或不可访问: " + root);
         }
         Path normalizedRoot = root.toAbsolutePath().normalize();
+        DoubleConsumer listener = progress == null ? ignored -> { } : progress;
+        listener.accept(0.0);
         int fileLimit = Math.max(0, largestFileLimit);
         MutableStats total = new MutableStats();
         MutableStats directFiles = new MutableStats();
@@ -87,9 +100,9 @@ public final class FolderSizeService {
             thread.setDaemon(true);
             return thread;
         });
-        List<Future<BranchResult>> futures = new ArrayList<>(childDirectories.size());
+        CompletionService<BranchResult> completions = new ExecutorCompletionService<>(executor);
         for (Path child : childDirectories) {
-            futures.add(executor.submit(() -> scanBranch(child, fileLimit)));
+            completions.submit(() -> scanBranch(child, fileLimit));
         }
         executor.shutdown();
 
@@ -97,8 +110,13 @@ public final class FolderSizeService {
         PriorityQueue<FolderUsage> largestFolders = new PriorityQueue<>(FOLDER_SIZE_ORDER);
         PriorityQueue<FolderUsage> notableFolders = new PriorityQueue<>(FOLDER_SIZE_ORDER);
         try {
-            for (Future<BranchResult> future : futures) {
+            int completed = 0;
+            int totalBranches = childDirectories.size();
+            while (completed < totalBranches) {
+                Future<BranchResult> future = completions.take();
                 BranchResult branch = future.get();
+                completed++;
+                listener.accept(totalBranches == 0 ? 1.0 : completed / (double) totalBranches);
                 total.merge(branch.stats());
                 total.folderCount++; // The direct child itself is a folder under the root.
                 FolderUsage direct = toUsage(branch.root(), branch.stats(), false);
@@ -109,6 +127,7 @@ public final class FolderSizeService {
                         offerFolder(notableFolders, folder, NOTABLE_FOLDER_LIMIT));
                 branch.largestFiles().forEach(file -> offerFile(largestFiles, file, fileLimit));
             }
+            if (totalBranches == 0) listener.accept(1.0);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             executor.shutdownNow();

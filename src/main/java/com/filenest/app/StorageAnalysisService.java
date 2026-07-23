@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.DoubleConsumer;
 
 /** Keeps disk scanning, cleanup advice, and URL model discovery as separate operations. */
 public final class StorageAnalysisService {
@@ -36,6 +37,11 @@ public final class StorageAnalysisService {
     /** Facts only: performs no AI request and produces no cleanup judgment. */
     public StorageScanResult scan(Path root) throws IOException {
         return scanner.scan(root, LARGE_FILE_LIMIT);
+    }
+
+    /** Scans storage facts and reports completed direct-directory work to the caller. */
+    public StorageScanResult scan(Path root, DoubleConsumer progress) throws IOException {
+        return scanner.scan(root, LARGE_FILE_LIMIT, progress);
     }
 
     /** Advice only: consumes a prior scan and performs no filesystem traversal. */

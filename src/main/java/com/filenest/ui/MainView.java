@@ -24,7 +24,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
-import javafx.scene.control.ProgressIndicator;
+import javafx.scene.control.ProgressBar;
 import javafx.scene.control.PasswordField;
 import javafx.scene.control.SelectionMode;
 import javafx.scene.control.TableCell;
@@ -87,7 +87,7 @@ public final class MainView {
     private final TextField aiUrlField = new TextField(env("FILENEST_LLM_ENDPOINT"));
     private final PasswordField aiKeyField = new PasswordField();
     private final ComboBox<String> aiModelBox = new ComboBox<>();
-    private final ProgressIndicator progress = new ProgressIndicator();
+    private final ProgressBar progress = new ProgressBar();
 
     private final Button scanButton = new Button("扫描文件夹占用");
     private final Button suggestButton = new Button("生成整理建议");
@@ -131,7 +131,8 @@ public final class MainView {
         root.setPadding(new Insets(10));
 
         progress.setVisible(false);
-        progress.setPrefSize(22, 22);
+        progress.setPrefWidth(180);
+        progress.setProgress(-1);
 
         executeButton.setDefaultButton(true);
         executeButton.setStyle("-fx-font-weight: bold;");
@@ -474,8 +475,19 @@ public final class MainView {
         ruleAutoButton.setDisable(true);
         aiAutoButton.setDisable(true);
         folderSizeLabel.setText("文件夹大小：扫描中…");
-        runAsync("正在并行扫描文件与各文件夹占用…",
-                () -> new MainScan(service.scan(ctx), storageService.scan(dir)), result -> {
+        Task<MainScan> scanTask = new Task<>() {
+            @Override
+            protected MainScan call() throws Exception {
+                updateProgress(0, 1);
+                OrganizeScan organizeScan = service.scan(ctx);
+                updateProgress(0.03, 1);
+                StorageScanResult storageScan = storageService.scan(dir, fraction ->
+                        updateProgress(0.03 + fraction * 0.97, 1));
+                updateProgress(1, 1);
+                return new MainScan(organizeScan, storageScan);
+            }
+        };
+        runTask("正在并行扫描文件与各文件夹占用…", scanTask, result -> {
                     if (!dir.equals(currentDir)) return;
                     currentOrganizeScan = result.organizeScan();
                     currentStorageScan = result.storageScan();
@@ -688,19 +700,30 @@ public final class MainView {
                 return work.call();
             }
         };
+        runTask(busyMsg, task, onSuccess);
+    }
+
+    private <T> void runTask(String busyMsg, Task<T> task, Consumer<T> onSuccess) {
         task.setOnSucceeded(e -> {
-            setBusy(false, "");
+            finishTask();
             onSuccess.accept(task.getValue());
         });
         task.setOnFailed(e -> {
-            setBusy(false, "");
+            finishTask();
             Throwable ex = task.getException();
             error(ex == null ? "未知错误" : ex.getMessage());
         });
+        progress.progressProperty().bind(task.progressProperty());
         setBusy(true, busyMsg);
         Thread t = new Thread(task, "filenest-task");
         t.setDaemon(true);
         t.start();
+    }
+
+    private void finishTask() {
+        progress.progressProperty().unbind();
+        progress.setProgress(-1);
+        setBusy(false, "");
     }
 
     private void setBusy(boolean busy, String message) {

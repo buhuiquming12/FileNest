@@ -22,6 +22,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * Calls an OpenAI-compatible chat-completions URL and converts its structured JSON answer
@@ -30,6 +34,10 @@ import java.util.Map;
  */
 public final class LlmAiAdvisor implements AiAdvisor {
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final int MAX_FILES_PER_REQUEST = 60;
+    private static final int MAX_REMOTE_FILES = 180;
+    private static final int MAX_PARALLEL_REQUESTS = 3;
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(12);
 
     private final String endpoint;
     private final String apiKey;
@@ -64,8 +72,49 @@ public final class LlmAiAdvisor implements AiAdvisor {
             return Collections.emptyList();
         }
         try {
-            String response = callModel(buildPrompt(files, context));
-            return parseResponse(response, files, context);
+            // Avoid one oversized request losing every suggestion on timeout. Successful
+            // batches are retained even if another batch is rejected by the model.
+            List<FileMeta> selected = files.stream().limit(MAX_REMOTE_FILES).toList();
+            List<List<FileMeta>> batches = new ArrayList<>();
+            for (int start = 0; start < selected.size(); start += MAX_FILES_PER_REQUEST) {
+                batches.add(selected.subList(start,
+                        Math.min(start + MAX_FILES_PER_REQUEST, selected.size())));
+            }
+            int workers = Math.min(MAX_PARALLEL_REQUESTS, batches.size());
+            ExecutorService executor = Executors.newFixedThreadPool(workers, runnable -> {
+                Thread thread = new Thread(runnable, "filenest-llm-batch");
+                thread.setDaemon(true);
+                return thread;
+            });
+            List<Future<List<FileAction>>> futures = new ArrayList<>(batches.size());
+            for (List<FileMeta> batch : batches) {
+                futures.add(executor.submit(() -> parseResponse(
+                        callModel(buildPrompt(batch, context)), batch, context)));
+            }
+            List<FileAction> result = new ArrayList<>();
+            RuntimeException firstFailure = null;
+            int successes = 0;
+            try {
+                for (Future<List<FileAction>> future : futures) {
+                    try {
+                        result.addAll(future.get());
+                        successes++;
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException("AI 批量请求已中断", interrupted);
+                    } catch (ExecutionException failed) {
+                        if (firstFailure == null) {
+                            Throwable cause = failed.getCause();
+                            firstFailure = new IllegalStateException(cause == null
+                                    ? "AI 批量请求失败" : cause.getMessage(), cause);
+                        }
+                    }
+                }
+            } finally {
+                executor.shutdownNow();
+            }
+            if (successes == 0 && firstFailure != null) throw firstFailure;
+            return result;
         } catch (Exception e) {
             // Configured instances are timeout/fallback wrapped by OrganizeService.
             throw new IllegalStateException("AI API 调用失败: " + e.getMessage(), e);
@@ -99,7 +148,7 @@ public final class LlmAiAdvisor implements AiAdvisor {
         messages.addObject().put("role", "user").put("content", prompt);
 
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(endpoint))
-                .timeout(Duration.ofSeconds(25))
+                .timeout(REQUEST_TIMEOUT)
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(

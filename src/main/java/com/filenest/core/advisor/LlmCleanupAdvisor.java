@@ -25,6 +25,7 @@ import java.util.Map;
 /** URL-model cleanup advisor. It returns recommendations only and cannot delete files. */
 public final class LlmCleanupAdvisor implements CleanupAdvisor {
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(12);
     private final String endpoint;
     private final String apiKey;
     private final String model;
@@ -62,15 +63,15 @@ public final class LlmCleanupAdvisor implements CleanupAdvisor {
                 .append(scan.total().folderCount()).append(" folders, ")
                 .append(scan.total().inaccessibleCount()).append(" inaccessible\n")
                 .append("一级目录：\n");
-        scan.folders().stream().limit(120).forEach(folder -> out.append("DIR ")
+        scan.folders().stream().limit(80).forEach(folder -> out.append("DIR ")
                 .append(relative(scan.root(), folder.path())).append(" | ").append(folder.bytes())
                 .append(" bytes | ").append(folder.fileCount()).append(" files\n"));
         out.append("重点嵌套目录（大目录以及缓存/构建目录）：\n");
-        scan.folderSamples().stream().limit(300).forEach(folder -> out.append("DIR ")
+        scan.folderSamples().stream().limit(120).forEach(folder -> out.append("DIR ")
                 .append(relative(scan.root(), folder.path())).append(" | ").append(folder.bytes())
                 .append(" bytes | ").append(folder.fileCount()).append(" files\n"));
         out.append("大文件：\n");
-        scan.largestFiles().stream().limit(250).forEach(file -> out.append("FILE ")
+        scan.largestFiles().stream().limit(120).forEach(file -> out.append("FILE ")
                 .append(relative(scan.root(), file.path())).append(" | ").append(file.bytes())
                 .append(" bytes | modified ").append(file.lastModified()).append('\n'));
         return out.toString();
@@ -85,7 +86,7 @@ public final class LlmCleanupAdvisor implements CleanupAdvisor {
         messages.addObject().put("role", "system").put("content", "Return valid JSON only. Never perform operations.");
         messages.addObject().put("role", "user").put("content", prompt);
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(endpoint))
-                .timeout(Duration.ofSeconds(25)).header("Content-Type", "application/json")
+                .timeout(REQUEST_TIMEOUT).header("Content-Type", "application/json")
                 .header("Accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(body), StandardCharsets.UTF_8));
         if (!apiKey.isBlank()) request.header("Authorization", "Bearer " + apiKey);
