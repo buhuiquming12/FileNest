@@ -546,10 +546,17 @@ public final class MainView {
                     .mapToLong(CleanupSuggestion::bytes).sum();
             long reviewCount = suggestions.stream()
                     .filter(item -> item.decision() == CleanupSuggestion.Decision.REVIEW).count();
+            StorageAnalysisService.AdviceRun run = storageService.lastAdviceRun();
+            String remoteStatus = !run.remoteConfigured()
+                    ? ""
+                    : run.remoteSucceeded()
+                    ? String.format("；URL AI 返回 %d 条，已合并显示 API 来源", run.remoteCount())
+                    : "；URL AI 调用失败，已回退本地建议：" + run.error();
             statusLabel.setText(suggestions.isEmpty()
-                    ? "未发现明确的清理候选；这通常意味着当前目录无需清理。"
-                    : String.format("已生成 %d 条：可删除 %d 项（约 %s），建议检查 %d 项；仅预览，不会自动删除。",
-                    suggestions.size(), deletableCount, FolderSizeService.formatBytes(deletableBytes), reviewCount));
+                    ? "未发现明确的清理候选；这通常意味着当前目录无需清理。" + remoteStatus
+                    : String.format("已生成 %d 条：可删除 %d 项（约 %s），建议检查 %d 项；仅预览，不会自动删除。%s",
+                    suggestions.size(), deletableCount, FolderSizeService.formatBytes(deletableBytes), reviewCount,
+                    remoteStatus));
         });
     }
     private void autoOrganize(AutoOrganizeSafetyPolicy.Mode mode) {

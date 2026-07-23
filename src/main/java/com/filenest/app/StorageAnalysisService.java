@@ -22,6 +22,15 @@ public final class StorageAnalysisService {
     private final CleanupAdvisor localAdvisor;
     private final UrlModelCatalog modelCatalog;
     private volatile CleanupAdvisor remoteAdvisor;
+    private volatile AdviceRun lastAdviceRun = AdviceRun.localOnly(0);
+
+    /** Details of the most recent cleanup-advice run, used to explain remote fallback. */
+    public record AdviceRun(boolean remoteConfigured, boolean remoteSucceeded,
+                            int localCount, int remoteCount, String error) {
+        static AdviceRun localOnly(int localCount) {
+            return new AdviceRun(false, false, localCount, 0, null);
+        }
+    }
 
     public StorageAnalysisService() {
         this(new FolderSizeService(), new HeuristicCleanupAdvisor(), new UrlModelCatalog());
@@ -48,30 +57,55 @@ public final class StorageAnalysisService {
     public List<CleanupSuggestion> advise(StorageScanResult scan) {
         List<CleanupSuggestion> local = localAdvisor.suggest(scan);
         CleanupAdvisor remote = remoteAdvisor;
-        if (remote == null || !remote.available()) return local;
+        if (remote == null || !remote.available()) {
+            lastAdviceRun = AdviceRun.localOnly(local.size());
+            return local;
+        }
         try {
             List<CleanupSuggestion> ai = remote.suggest(scan);
-            if (ai.isEmpty()) return local;
             Map<Path, CleanupSuggestion> merged = new LinkedHashMap<>();
             for (CleanupSuggestion item : local) merged.put(item.path().toAbsolutePath().normalize(), item);
             for (CleanupSuggestion item : ai) {
                 Path path = item.path().toAbsolutePath().normalize();
                 CleanupSuggestion existing = merged.get(path);
-                // The remote model may add context, but it may never weaken a local safety verdict.
-                int aiRank = decisionRank(item.decision());
-                int localRank = existing == null ? -1 : decisionRank(existing.decision());
-                if (existing == null || aiRank > localRank
-                        || (aiRank == localRank && item.confidence() > existing.confidence())) {
-                    merged.put(path, item);
-                }
+                merged.put(path, merge(existing, item));
             }
+            lastAdviceRun = new AdviceRun(true, true, local.size(), ai.size(), null);
             return merged.values().stream().sorted((a, b) -> {
                 int decision = Integer.compare(decisionRank(a.decision()), decisionRank(b.decision()));
                 return decision != 0 ? decision : Long.compare(b.bytes(), a.bytes());
             }).toList();
         } catch (RuntimeException unavailable) {
+            lastAdviceRun = new AdviceRun(true, false, local.size(), 0,
+                    unavailable.getMessage() == null ? unavailable.getClass().getSimpleName()
+                            : unavailable.getMessage());
             return local;
         }
+    }
+
+    static CleanupSuggestion merge(CleanupSuggestion local, CleanupSuggestion remote) {
+        if (local == null) return remote;
+        // Preserve the safer verdict while retaining both advisors' provenance.
+        int remoteRank = decisionRank(remote.decision());
+        int localRank = decisionRank(local.decision());
+        CleanupSuggestion chosen = remoteRank > localRank ? remote : local;
+        if (remoteRank == localRank && remote.confidence() > local.confidence()) {
+            chosen = remote;
+        }
+        String reason = local.reason();
+        if (!remote.reason().isBlank() && !remote.reason().equals(local.reason())) {
+            reason = reason.isBlank() ? remote.reason() : reason + " | URL AI: " + remote.reason();
+        }
+        String source = local.source();
+        if (!remote.source().isBlank() && !remote.source().equals(local.source())) {
+            source = source.isBlank() ? remote.source() : source + " + " + remote.source();
+        }
+        return new CleanupSuggestion(chosen.path(), chosen.bytes(), chosen.decision(),
+                reason, chosen.confidence(), source);
+    }
+
+    public AdviceRun lastAdviceRun() {
+        return lastAdviceRun;
     }
 
     private static int decisionRank(CleanupSuggestion.Decision decision) {
